@@ -166,6 +166,7 @@ class HostapdConfig:
     ssid: The WiFi SSID.
     password: The WiFi password.
     interface: The name of the network interface that the WiFi network is using.
+    config_content: The content of the hostapd configuration file.
   """
 
   channel: int
@@ -180,6 +181,8 @@ class HostapdConfig:
     self._raw = {}
     self.update('logger_syslog', '-1')
     self.update('logger_syslog_level', '0')
+    self.update('rts_threshold', '-1')
+    self.update('fragm_threshold', '2346')
     self.update('driver', 'nl80211')
     self.set_interface(interface)
 
@@ -196,6 +199,7 @@ class HostapdConfig:
     self.set_channel(wifi_config.channel)
     self._update_dfs_channel_config(wifi_config)
 
+    self.update('ieee80211d', '1')  # Required when country_code is set.
     self.update('country_code', wifi_config.country_code)
     self.update('hw_mode', self._get_hw_mode(wifi_config))
     self._update_according_to_wifi_standard(wifi_config)
@@ -228,11 +232,14 @@ class HostapdConfig:
     """Returns true if the channel is a DFS channel."""
     return self.channel in self._dfs_channels
 
-  def write_to_file(self, filepath: str) -> None:
+  @property
+  def config_content(self) -> str:
+    return '\n'.join(f'{key}={value}' for key, value in self._raw.items())
+
+  def write_to_file(self, filepath: str, content: str) -> None:
     """Writes the configurations to the given host filepath."""
     with open(filepath, 'w') as f:
-      for key, value in self._raw.items():
-        f.write(f'{key}={value}\n')
+      f.write(content)
 
   def _get_hw_mode(self, wifi_config: wifi_configs.WiFiConfig) -> str:
     """Get the hwmode."""
@@ -420,13 +427,15 @@ class HostapdManager:
     return self._wifi_info
 
   def _generate_remote_config_file(self) -> str:
+    """Generates the hostapd config file on the AP device."""
     filename = self._get_conf_filename()
     local_path = self._get_local_path(filename)
     remote_path = self._get_remote_path(filename)
 
     self._hostapd_config = typing.cast(HostapdConfig, self._hostapd_config)
-    self._hostapd_config.write_to_file(local_path)
-    self._device.ssh.push(local_path, remote_path)
+    config_content = self._hostapd_config.config_content
+    self._hostapd_config.write_to_file(local_path, config_content)
+    self._device.push_file(local_path, remote_path)
 
     # Rename the local file so it can be directly opened on Sponge.
     os.rename(local_path, f'{local_path}.txt')

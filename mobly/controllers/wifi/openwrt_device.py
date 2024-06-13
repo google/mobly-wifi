@@ -24,6 +24,7 @@ import time
 from typing import Any
 
 from mobly import logger as mobly_logger
+from mobly import runtime_test_info
 from mobly import utils
 from mobly.controllers.android_device_lib import service_manager
 import paramiko
@@ -31,7 +32,9 @@ import paramiko
 from google3.pyglib import resources
 from mobly.controllers.wifi.lib import ssh as ssh_lib
 from mobly.controllers.wifi.lib import constants
+from mobly.controllers.wifi.lib import device_info_utils
 from mobly.controllers.wifi.lib import iw_utils
+from mobly.controllers.wifi.lib import sniffer_manager
 from mobly.controllers.wifi.lib import utils as wifi_utils
 from mobly.controllers.wifi.lib import wifi_configs
 from mobly.controllers.wifi.lib import wifi_manager
@@ -48,6 +51,16 @@ _DEVICE_REBOOT_WAIT = datetime.timedelta(seconds=10)
 _BOOT_STATUS_CHECK_INTERVAL = datetime.timedelta(seconds=5)
 _BOOT_STATUS_CHECK_TIMEOUT = datetime.timedelta(minutes=5)
 _SSH_CONNECTION_TIMEOUT = datetime.timedelta(minutes=5)
+
+
+_ERR_USE_AS_BOTH_AP_AND_SNIFFER = (
+    "{device} It's not supported to use one OpenWrt device as both AP and"
+    ' sniffer at the same time.'
+)
+
+_ERR_START_PACKET_CAPTURE_ARG_ERROR = (
+    '{device} Exactly one of wifi_config and freq_config must be provided.'
+)
 
 
 class Error(Exception):
@@ -130,8 +143,14 @@ class OpenWrtDevice:
           f' {config!r}.'
       )
     self._hostname = config['hostname']
+    self._username = config.get('username', constants.SSH_USERNAME)
+    self._password = config.get('password', None)
+    self._provide_long_running_wifi = config.get(
+        'provide_long_running_wifi', False
+    )
     self._ssh_port = _SSH_PORT
     self.serial = f'{self._hostname}:{self._ssh_port}'
+    self._device_info = None
 
     log_path = getattr(logging, 'log_path', '/tmp/logs')
     log_filename = mobly_logger.sanitize_filename(
@@ -155,17 +174,26 @@ class OpenWrtDevice:
     self._ssh = self._create_ssh_connection()
     self._wifi_manager = wifi_manager.WiFiManager(device=self)
     self.services = service_manager.ServiceManager(device=self)
+    self._sniffer_manager = sniffer_manager.SnifferManager(device=self)
 
   def __repr__(self) -> str:
     return f'<{_DEVICE_TAG}|{self.serial}>'
 
   def _create_ssh_connection(self) -> ssh_lib.SSHProxy:
-    return ssh_lib.SSHProxy(
-        hostname=self._hostname,
-        ssh_port=self._ssh_port,
-        username=constants.SSH_USERNAME,
-        keyfile=_SSH_KEY_IDENTITY,
-    )
+    if self._password is None:
+      return ssh_lib.SSHProxy(
+          hostname=self._hostname,
+          ssh_port=self._ssh_port,
+          username=self._username,
+          keyfile=_SSH_KEY_IDENTITY,
+      )
+    else:
+      return ssh_lib.SSHProxy(
+          hostname=self._hostname,
+          ssh_port=self._ssh_port,
+          username=self._username,
+          password=self._password,
+      )
 
   @property
   def wifi_id_counter(self) -> Iterator[int]:
@@ -187,7 +215,7 @@ class OpenWrtDevice:
       self._remote_work_dir = os.path.join(
           constants.REMOTE_WORK_DIR, f'test-{time_str}'
       )
-      self.ssh.make_dirs(str(self._remote_work_dir))
+      self.make_dirs(self._remote_work_dir)
     return self._remote_work_dir
 
   def initialize(self):
@@ -199,10 +227,26 @@ class OpenWrtDevice:
     self._ssh.connect(
         open_sftp=False, timeout=_SSH_CONNECTION_TIMEOUT.total_seconds()
     )
-    # This is required by the ssh lib to use sftp.
-    self._install_package(constants.OPENWRT_PACKAGE_SFTP)
 
-    self.reboot()
+    # This is required by the ssh lib to use sftp.
+    try:
+      self._install_package(constants.OPENWRT_PACKAGE_SFTP)
+      self._is_sftp_installed = True
+    except ssh_lib.ExecuteCommandError:
+      self.log.exception('Fail to install %s', constants.OPENWRT_PACKAGE_SFTP)
+      self._is_sftp_installed = False
+
+    packages = constants.REQUIRED_PACKAGES_OFFICIAL
+    if wifi_utils.is_using_openwrt_snapshot_image(self.device_info['release']):
+      packages = constants.REQUIRED_PACKAGES_SNAPSHOT
+
+    for pkg in packages:
+      self._install_package(pkg)
+
+    openwrt_g3.install_z_cros_test(self)
+
+    if not self._provide_long_running_wifi:
+      self.reboot()
 
     self._register_syslog_service()
 
@@ -271,7 +315,8 @@ class OpenWrtDevice:
     """Returns whether the device is ready after reboot."""
     try:
       self._ssh.connect(
-          open_sftp=True, timeout=_SSH_CONNECTION_TIMEOUT.total_seconds()
+          open_sftp=getattr(self, '_is_sftp_installed', True),
+          timeout=_SSH_CONNECTION_TIMEOUT.total_seconds(),
       )
       self._ssh.execute_command(
           constants.Commands.CHECK_DEVICE_REBOOT_READY,
@@ -309,18 +354,78 @@ class OpenWrtDevice:
   @property
   def device_info(self) -> Mapping[str, str]:
     """Information to be pulled into controller info in the test summary."""
-    return {
-        'serial': self.serial,
-    }
+    if self._device_info is None:
+      self._device_info = device_info_utils.get_device_info(device=self) | {
+          'serial': self.serial
+      }
+    return self._device_info
 
   @property
   def ssh(self) -> ssh_lib.SSHProxy:
     """The ssh connection to the AP device."""
     return self._ssh
 
+  def make_dirs(self, remote_dir: str) -> None:
+    """Recursively makes directories on the remote machine.
+
+    Args:
+      remote_dir: string, the remote directory.
+
+    Raises:
+      RuntimeError: a component in remote_dir is not a directory.
+      SSHNotConnectedError: If sftp is not connected.
+    """
+    try:
+      self.ssh.make_dirs(remote_dir)
+    except ssh_lib.SSHNotConnectedError as e:
+      if 'Cannot use SFTP' not in str(e):
+        raise
+      self.ssh.execute_command(
+          command=f'mkdir -p {remote_dir}',
+          timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
+      )
+
+  def push_file(
+      self,
+      local_src_filename: str,
+      remote_dest_filename: str,
+      change_permission: bool = False,
+  ) -> None:
+    """Pushes local file to the remote machine.
+
+    Args:
+      local_src_filename: the local file.
+      remote_dest_filename: the destination file location in the remote machine.
+      change_permission: whether to change the permission to 777 on remote
+        destination.
+    """
+    try:
+      self.ssh.push(local_src_filename, remote_dest_filename, change_permission)
+    except ssh_lib.SSHNotConnectedError as e:
+      if 'Cannot use SFTP' not in str(e):
+        raise
+      # Try to use `echo` command to write the file content to the remote file.
+      # This is a workaround for the issue when `sftp` command in not available.
+      self.ssh.execute_command(f'rm -f {remote_dest_filename}')
+      with open(local_src_filename, 'r') as f:
+        content = f.read().replace('"', r'\"').replace('$', '\$')  # pylint: disable=anomalous-backslash-in-string
+        self.ssh.execute_command(
+            # Not using f-string for string concatenation here is bc the content
+            # may contain the reserved keywords '{' and '}', which will be
+            # consumed by the f-string formatting.
+            'echo "'
+            + content
+            + '" >> '
+            + remote_dest_filename
+        )
+      if change_permission:
+        self.ssh.execute_command(f'chmod 777 {remote_dest_filename}')
+
   def start_wifi(
       self, config: wifi_configs.WiFiConfig
   ) -> wifi_configs.WifiInfo:
+    if self._sniffer_manager.is_alive:
+      raise Error(_ERR_USE_AS_BOTH_AP_AND_SNIFFER.format(device=self))
     return self._wifi_manager.start_wifi(config)
 
   def stop_wifi(self, wifi_info: wifi_configs.WifiInfo) -> None:
@@ -367,8 +472,60 @@ class OpenWrtDevice:
         device=self, interface=wifi_info.interface, mac_address=mac_address
     )
 
+  def get_all_wifi_ssid(self) -> Sequence[str]:
+    """Gets all currently broadcasting Wi-Fi SSIDs."""
+    return [
+        interface.ssid
+        for interface in iw_utils.get_all_interfaces(self)
+        if interface.type == 'AP' and interface.ssid is not None
+    ]
+
+  def start_packet_capture(
+      self,
+      wifi_config: wifi_configs.WiFiConfig | None = None,
+      freq_config: wifi_configs.FreqConfig | None = None,
+      capture_config: wifi_configs.PcapConfig | None = None,
+  ):
+    """Starts pacaket capture on a specific channel.
+
+    You need to provide either wifi_config or freq_config. If you provide
+    `freq_config`, this will monitor the frequency band specified by it. If you
+    provide `wifi_config`, this method will extract channel info from it and
+    monitor the same channel that is used by the WiFi network.
+
+    Args:
+      wifi_config: The WiFi network to capture the packets.
+      freq_config: The frequency to capture the packets.
+      capture_config: The configuration to control the packet capture process.
+
+    Raises:
+      Error: If both wifi_config and freq_config are provided or not provided.
+    """
+    if sum([wifi_config is not None, freq_config is not None]) != 1:
+      raise Error(_ERR_START_PACKET_CAPTURE_ARG_ERROR.format(device=self))
+    if self._wifi_manager.is_alive:
+      raise Error(_ERR_USE_AS_BOTH_AP_AND_SNIFFER.format(device=self))
+
+    if wifi_config is not None:
+      freq_config = wifi_configs.get_freq_config(wifi_config)
+    self._sniffer_manager.start_capture(
+        freq_config=freq_config, capture_config=capture_config
+    )
+
+  def stop_packet_capture(
+      self, current_test_info: runtime_test_info.RuntimeTestInfo | None = None
+  ):
+    """Stops pacaket capture."""
+    self._sniffer_manager.stop_capture(current_test_info=current_test_info)
+
+  def get_capture_file(self) -> str | None:
+    """Gets the full path of the last capture."""
+    return self._sniffer_manager.get_capture_file()
+
   def teardown(self):
     """Tears the device object down."""
     self.log.info('Tearing down the controller.')
-    self._wifi_manager.teardown()
+    self._sniffer_manager.teardown()
+    if not self._provide_long_running_wifi:
+      self._wifi_manager.teardown()
     self._ssh.disconnect()

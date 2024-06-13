@@ -16,6 +16,7 @@
 
 import datetime
 import enum
+import re
 
 import immutabledict
 
@@ -118,16 +119,20 @@ class Commands(enum.StrEnum):
       ' {broadcast_ip}'
   )
   IP_LINK_SHOW = 'ip link show {interface}'
+  IP_LINK_UP = 'ip link set {interface} up'
 
   IW_PHY = 'iw phy'
   IW_PHY_INFO = 'iw phy {phy} info'
   IW_REG_SET = 'iw reg set {country_code}'
   IW_REG_GET = 'iw reg get'
+  IW_DEV = 'iw dev'
   IW_DEV_DEL = 'iw dev {interface} del'
   IW_DEV_ADD = 'iw phy {phy} interface add {interface} type managed'
+  IW_DEV_ADD_MONITOR = 'iw phy {phy} interface add {interface} type monitor'
   IW_DEV_INFO = 'iw dev {interface} info'
   IW_DEV_STATION_DUMP = 'iw dev {interface} station dump'
   IW_DEV_STATION_GET = 'iw dev {interface} station get {station_mac_address}'
+  IW_DEV_SET_FREQ = 'iw dev {interface} set freq {freq_args}'
 
   # Firewall rules related commands
   FIREWALL_ENABLE_IP_FORWARD = 'echo 1 > /proc/sys/net/ipv4/ip_forward'
@@ -142,8 +147,12 @@ class Commands(enum.StrEnum):
       ' conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT'
   )
 
+  START_TCPDUMP = (
+      'tcpdump -vv -i {interface} -U -e -B 1024 -w {file_path} {filter}'
+  )
+
   # Opkg commands.
-  OPKG_LIST = 'opkg list {package}'
+  OPKG_LIST = 'opkg list-installed {package}'
   OPKG_UPDATE = 'opkg update'
   OPKG_INSTALL = 'opkg install {package}'
 
@@ -172,5 +181,40 @@ HOSTAPD = 'hostapd'
 SSH_USERNAME = 'root'
 
 REMOTE_WORK_DIR = '/tmp/mobly_artifacts'
+OPENWRT_RELEASE_INFO_FILE_PATH = '/etc/openwrt_release'
+CURSTOM_RELEASE_INFO_FILE_PATH = '/etc/cros/cros_openwrt_image_build_info.json'
 
+OPENWRT_PACKAGE_IPTABLES = 'iptables'
 OPENWRT_PACKAGE_SFTP = 'openssh-sftp-server'
+OPENWRT_PACKAGE_SUDO = 'sudo'
+OPENWRT_PACKAGE_HOSTAPD = 'hostapd'
+OPENWRT_PACKAGE_TCPDUMP = 'tcpdump'
+
+# Required packages when using an OpenWrt image built against snapshot.
+# * Do NOT include `iptables` because snapshot images have limitation on
+#   installing kernel version dependent modules. Reference:
+#   https://openwrt.org/releases/snapshot
+REQUIRED_PACKAGES_SNAPSHOT = (
+    OPENWRT_PACKAGE_SUDO,
+    OPENWRT_PACKAGE_HOSTAPD,
+    OPENWRT_PACKAGE_TCPDUMP,
+)
+
+# Required packages when using an official OpenWrt image.
+# * Do NOT include `hostapd` because it might be installed but not through
+#   opkg.
+REQUIRED_PACKAGES_OFFICIAL = (
+    OPENWRT_PACKAGE_SUDO,
+    OPENWRT_PACKAGE_IPTABLES,
+    OPENWRT_PACKAGE_TCPDUMP,
+)
+
+DEVICE_INFO_PATTERN = re.compile(
+    r"DISTRIB_ID='(?P<image_type>.*)'\n"
+    r"DISTRIB_RELEASE='(?P<release>.*)'\n"
+    r"DISTRIB_REVISION='(?P<revision>.*)'\n"
+    r"DISTRIB_TARGET='(?P<target>.*)'\n"
+    r"DISTRIB_ARCH='(?P<arch>.*)'\n"
+    r"DISTRIB_DESCRIPTION='(?P<description>.*)'\n"
+    r"DISTRIB_TAINTS='(?P<taints>.*)'"
+)

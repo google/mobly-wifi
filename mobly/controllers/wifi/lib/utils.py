@@ -19,6 +19,10 @@ import string
 import time
 from typing import Callable
 
+from packaging import version
+
+_OPENWRT_NEW_FIREWALL_RULE_VERSION = version.parse('22.03')
+
 
 def is_hex_string(s: str) -> bool:
   """True if the given string is a hex string; False otherwise."""
@@ -50,3 +54,14 @@ def wait_for_predicate(
     if interval is not None:
       time.sleep(interval.total_seconds())
   return False
+
+
+def is_new_firewall_rule_version(version_number: str) -> bool:
+  """Returns True if OpenWrt version is new firewall rule, False otherwise."""
+  parsed_version = version.parse(version_number)
+  return parsed_version >= _OPENWRT_NEW_FIREWALL_RULE_VERSION
+
+
+def is_using_openwrt_snapshot_image(release: str) -> bool:
+  """Returns True if the image is built against SNAPSHOT, False otherwise."""
+  return release == 'SNAPSHOT'

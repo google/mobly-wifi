@@ -30,6 +30,43 @@ from mobly.controllers.wifi.lib.encryption import wpa
 # TODO(b/310813723): move Ieee80211Standards from constants to this module.
 Ieee80211Standards = constants.Ieee80211Standards
 
+# For these channels, they support both HT40+ and HT40- so we cannot auto detect
+# HT mode for them.
+CHANNELS_HT40_PLUS_AND_MINUS = frozenset([5, 6, 7, 8, 9])
+
+# Channels that only supports HT40+.
+CHANNELS_HT40_PLUS = frozenset(
+    [1, 2, 3, 4, 36, 44, 52, 60, 100, 108, 116, 124, 132, 140, 149, 157]
+)
+
+# Channels that only supports HT40-.
+CHANNELS_HT40_MINUS = frozenset(
+    [10, 11, 12, 13, 40, 48, 56, 64, 104, 112, 120, 128, 136, 144, 153, 161]
+)
+
+START_FREQ_FOR_WIDTH_80_SEGMENTS = (
+    5180,
+    5260,
+    5500,
+    5580,
+    5660,
+    5745,
+    5955,
+    6035,
+    6115,
+    6195,
+    6275,
+    6355,
+    6435,
+    6515,
+    6595,
+    6675,
+    6755,
+    6835,
+    6915,
+    6995,
+)
+
 
 @enum.unique
 class ChannelWidth(enum.StrEnum):
@@ -50,19 +87,15 @@ class ChannelWidth(enum.StrEnum):
         return '1'
 
 
-# For these channels, they support both HT40+ and HT40- so we cannot auto detect
-# HT mode for them.
-CHANNELS_HT40_PLUS_AND_MINUS = frozenset([5, 6, 7, 8, 9])
+@enum.unique
+class HTMode(enum.StrEnum):
+  """High throughput mode."""
 
-# Channels that only supports HT40+.
-CHANNELS_HT40_PLUS = frozenset(
-    [1, 2, 3, 4, 36, 44, 52, 60, 100, 108, 116, 124, 132, 140, 149, 157]
-)
-
-# Channels that only supports HT40-.
-CHANNELS_HT40_MINUS = frozenset(
-    [10, 11, 12, 13, 40, 48, 56, 64, 104, 112, 120, 128, 136, 144, 153, 161]
-)
+  NOHT = 'NOHT'
+  HT20 = 'HT20'
+  HT40_PLUS = 'HT40+'
+  HT40_MINUS = 'HT40-'
+  HT80 = 'HT80'
 
 
 @enum.unique
@@ -115,6 +148,35 @@ def generate_wifi_ssid(band_type: BandType) -> str:
   return f'OpenWRT-{band_type.value}-{random_str}'
 
 
+def _transform_channel_width_to_ht_mode(
+    width: ChannelWidth,
+    channel: int,
+    standard: Ieee80211Standards,
+    ht_capab: Sequence[HostapdHTCapab],
+) -> HTMode:
+  """Transforms channel width to HT mode."""
+  match width:
+    case ChannelWidth.WIDTH_20:
+      if standard in constants.STANDARDS_SUPPORT_HT_CAPAB:
+        return HTMode.HT20
+      else:
+        return HTMode.NOHT
+
+    case ChannelWidth.WIDTH_40:
+      if channel in CHANNELS_HT40_PLUS_AND_MINUS:
+        if HostapdHTCapab.HT40_PLUS in ht_capab:
+          return HTMode.HT40_PLUS
+        else:
+          return HTMode.HT40_MINUS
+      elif channel in CHANNELS_HT40_PLUS:
+        return HTMode.HT40_PLUS
+      else:
+        return HTMode.HT40_MINUS
+
+    case ChannelWidth.WIDTH_80:
+      return HTMode.HT80
+
+
 def _get_default_width(band_type: BandType) -> ChannelWidth:
   """Gets the default width with a given band type."""
   match band_type:
@@ -163,7 +225,7 @@ class WiFiConfig:
   # with its own dhcp server, and traffic will only be routed to specific subnet
   # when needed. Otherwise, all wireless networks will be shared together with
   # the WAN and it assumes there's a DHCP server running in the WAN.
-  access_wan_through_nat: bool = False
+  access_wan_through_nat: bool = True
 
   custom_hostapd_configs: Mapping[str, str] = dataclasses.field(
       default_factory=dict
@@ -264,3 +326,73 @@ class WifiInfo:
   password: str | None
   interface: str
   phy_name: str
+
+
+@dataclasses.dataclass
+class FreqConfig:
+  """The class for representing the frequency band used by a wireless network.
+
+  This class is using the same way to represent the frequency band as hostapd.
+  See the docstring of `vht_oper_centr_freq_seg1_idx` for more details.
+
+  When the band width is smaller than 80MHz, the frequency of the center1 should
+  be always be zero. When the band width is 80MHz, the frequency of the center1
+  will be automatically calculated.
+
+  Attributes:
+    channel: The control channel of the frequency band.
+    ht_mode: The HT mode of the frequency band.
+    center1_freq: The frequency of the center1.
+  """
+
+  channel: int
+  ht_mode: HTMode
+  center1_freq: int = 0
+
+  def __post_init__(self):
+    self._check_center_freq()
+
+  def _check_center_freq(self):
+    match self.ht_mode:
+      case HTMode.NOHT | HTMode.HT20 | HTMode.HT40_PLUS | HTMode.HT40_MINUS:
+        if self.center1_freq != 0:
+          raise errors.ConfigError(
+              'Specifying center1 frequency is not allowed for width'
+              f' {self.ht_mode}.'
+          )
+      case HTMode.HT80:
+        if self.center1_freq == 0:
+          self.center1_freq = self._calc_center1_freq_for_width80()
+
+  def _calc_center1_freq_for_width80(self) -> int:
+    control_freq = constants.CHANNEL_TO_FREQUENCY[self.channel]
+    for f in START_FREQ_FOR_WIDTH_80_SEGMENTS:
+      if control_freq >= f and control_freq < f + 80:
+        return f + 30
+    raise errors.ConfigError(
+        f'Got unsupported control frequency {control_freq} for width 80MHz.'
+    )
+
+
+def get_freq_config(wifi_config: WiFiConfig) -> FreqConfig:
+  """Gets the frequency configuration from the given WiFi configuration."""
+  ht_mode = _transform_channel_width_to_ht_mode(
+      wifi_config.width,
+      wifi_config.channel,
+      wifi_config.standard,
+      wifi_config.ht_capab or [],
+  )
+  return FreqConfig(channel=wifi_config.channel, ht_mode=ht_mode)
+
+
+@dataclasses.dataclass(frozen=True)
+class PcapConfig:
+  """Configurations for controlling the packet capture process.
+
+  Attributes:
+    ignore_qos_data_frames: Whether to ignore QoS data frames. Note that an
+      exception is that this will not ignore EAPOL frames which are used for
+      WPA2-PSK authentication.
+  """
+
+  ignore_qos_data_frames: bool = True

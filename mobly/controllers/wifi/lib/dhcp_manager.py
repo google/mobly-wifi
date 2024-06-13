@@ -238,7 +238,7 @@ class DhcpManager:
     remote_path = self._get_remote_path(filename)
     with open(local_path, 'w') as f:
       f.write(config_content)
-    self._device.ssh.push(local_path, remote_path)
+    self._device.push_file(local_path, remote_path)
     # Rename the local file so it can be directly opened on Sponge.
     os.rename(local_path, f'{local_path}.txt')
 
