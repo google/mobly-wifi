@@ -1,6 +1,6 @@
 # Mobly WiFi Controller
 
-Mobly WiFi controller module for using Python code to operate OpenWrt AP devices in Mobly tests.
+Mobly WiFi controller module for using Python code to operate network devices in Mobly tests.
 
 ## Requirements
 

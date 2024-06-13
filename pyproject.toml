@@ -1,0 +1,14 @@
+[project]
+name = "mobly-wifi"
+description = "Mobly WiFi controller module for using Python code to operate network devices in Mobly tests."
+authors = [{ name = "Google Inc." }]
+maintainers = [{ name = "Minghao Li", email = "minghaoli@google.com" }]
+license = { file = "LICENSE" }
+readme = "README.md"
+requires-python = ">=3.11"
+version = "1.0.1"
+dependencies = [
+    'mobly>=1.12.2',
+    'immutabledict',
+    'paramiko',
+]
