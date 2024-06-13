@@ -27,6 +27,10 @@ class HostapdStartError(BaseError):
   """Raised if it failed to start hostapd on the AP device."""
 
 
+class SnifferManagerError(BaseError):
+  """Raised if some failure related to sniffer manager happened."""
+
+
 class SystemLogServiceError(BaseError):
   """Root error type for system log service."""
 

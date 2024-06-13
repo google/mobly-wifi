@@ -53,6 +53,13 @@ _STATION_TITLE_RE_GROUP = 'mac_address'
 _ASSOCIATED_AT_RE = re.compile(r'associated at:\s*(?P<timestamp>\d+) ms')
 _ASSOCIATED_AT_RE_GROUP = 'timestamp'
 
+_IW_DEV_RE = re.compile(
+    r'Interface\s+(?P<name>.*)(.|\n)*?'
+    r'addr\s+(?P<addr>.*)(.|\n)*?'
+    r'(ssid\s+(?P<ssid>.*)(.|\n)*?)?'
+    r'type\s+(?P<type>.*)'
+)
+
 
 class IwOutputParsingError(errors.BaseError):
   """Failed to parse the output of the `iw` command."""
@@ -83,6 +90,24 @@ class Band:
 
   num: int
   channels: Sequence[Channel]
+
+
+@dataclasses.dataclass(frozen=True)
+class Interface:
+  """Interface information in the `iw dev` output.
+
+  Attributes:
+    name: The name of the interface.
+    addr: The MAC address of the interface.
+    type: Specify the operating mode of the interface.
+    ssid: The SSID of the interface, None if the interface is not a broadcasting
+      Wi-Fi.
+  """
+
+  name: str
+  addr: str
+  type: str
+  ssid: str | None = None
 
 
 @dataclasses.dataclass(frozen=True, eq=True, order=True)
@@ -458,3 +483,14 @@ def get_station_info(
   stations = _parse_iw_station_output(output)
   # The output of the above command will contain one station at most.
   return stations[0]
+
+
+def get_all_interfaces(device: 'OpenWrtDevice') -> Sequence[Interface]:
+  """Gets all interfaces on the given AP device."""
+  output = device.ssh.execute_command(
+      command=constants.Commands.IW_DEV,
+      timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
+  )
+  return [
+      Interface(**match.groupdict()) for match in _IW_DEV_RE.finditer(output)
+  ]

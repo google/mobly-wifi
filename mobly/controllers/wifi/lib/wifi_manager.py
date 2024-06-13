@@ -31,6 +31,7 @@ from mobly.controllers.wifi.lib import dhcp_manager
 from mobly.controllers.wifi.lib import errors
 from mobly.controllers.wifi.lib import hostapd_manager
 from mobly.controllers.wifi.lib import iw_utils
+from mobly.controllers.wifi.lib import utils
 from mobly.controllers.wifi.lib import wifi_configs
 
 # Avoid directly importing cros_device, which causes circular dependencies
@@ -105,6 +106,15 @@ class WiFiManager:
         timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
     )
 
+    # TODO: Temp workaround for new firewall rule.
+    if utils.is_new_firewall_rule_version(self._device.device_info['release']):
+      return
+
+    if utils.is_using_openwrt_snapshot_image(
+        self._device.device_info['release']
+    ):
+      return
+
     # Enable NAT, i.e., outbound traffic through the WAN interface will have its
     # source addr replaced with the WAN interface.
     self._device.ssh.execute_command(
@@ -113,6 +123,11 @@ class WiFiManager:
         ),
         timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
     )
+
+  @property
+  def is_alive(self) -> bool:
+    """True if there are any running WiFi networks, False otherwise."""
+    return bool(self._running_wifis)
 
   def start_wifi(
       self, config: wifi_configs.WiFiConfig
@@ -171,7 +186,9 @@ class WiFiManager:
       self._running_wifis[wifi_id].dhcp_manager = dhcp_manager_obj
 
     self._modify_firewall_rules(
-        interface, action=constants.IptablesAction.INSERT
+        interface,
+        action=constants.IptablesAction.INSERT,
+        access_wan_through_nat=config.access_wan_through_nat,
     )
 
     self._log.debug(
@@ -226,11 +243,29 @@ class WiFiManager:
     return interface
 
   def _modify_firewall_rules(
-      self, interface: str, action: constants.IptablesAction
+      self,
+      interface: str,
+      action: constants.IptablesAction,
+      access_wan_through_nat: bool,
   ):
     """Modifies firewall rules to forward traffic between the WLAN and WAN."""
+    if utils.is_using_openwrt_snapshot_image(
+        self._device.device_info['release']
+    ):
+      return
+
+    # TODO: Temp workaround for new firewall rule.
+    if utils.is_new_firewall_rule_version(self._device.device_info['release']):
+      if access_wan_through_nat:
+        raise errors.ConfigError(
+            f'Config access_wan_through_nat=True is not supported under current'
+            f"OpenWrt version {self._device.device_info['release']}"
+        )
+      return
+
     wan_interface = self._wan_interface
     wireless_interface = interface
+
     # The rule that allows all packets from wireless interface to WAN interface.
     self._device.ssh.execute_command(
         command=constants.Commands.FIREWALL_FORWARD_KNOWN_TRAFFIC.format(
@@ -291,7 +326,9 @@ class WiFiManager:
 
     # Remove added firewall rules.
     self._modify_firewall_rules(
-        component.info.interface, action=constants.IptablesAction.DELETE
+        component.info.interface,
+        action=constants.IptablesAction.DELETE,
+        access_wan_through_nat=component.config.access_wan_through_nat,
     )
 
     # Stop hostapd manager.
