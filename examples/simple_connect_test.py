@@ -12,6 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""A simple connect example test.
+
+It perform following steps:
+
+1. Start packet capture on an OpenWrt AP device.
+2. Start a WiFi network on another OpenWrt AP device.
+3. Connect an Android phone to the WiFi, verify the internet connection.
+4. Teardown test, and get captured packets.
+"""
+
 import dataclasses
 import datetime
 import enum

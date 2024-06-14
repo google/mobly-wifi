@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""A basic Mobly Test with OpenWrt AP device."""
+
 import time
 
 from mobly import base_test
@@ -33,7 +35,7 @@ class HelloWorldTest(base_test.BaseTestClass):
         wifi_info.ssid,
         wifi_info.password,
     )
-    # Sleep 5 seconds for you to manual check.
+    # Sleep a while, you can manually connect your device to the WiFi.
     time.sleep(60)
  
 if __name__ == '__main__':
