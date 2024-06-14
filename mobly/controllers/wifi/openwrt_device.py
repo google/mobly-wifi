@@ -147,6 +147,7 @@ class OpenWrtDevice:
     self._provide_long_running_wifi = config.get(
         'provide_long_running_wifi', False
     )
+    self._skip_init_reboot = config.get('skip_init_reboot', False)
     self._ssh_port = _SSH_PORT
     self.serial = f'{self._hostname}:{self._ssh_port}'
     self._device_info = None
@@ -242,7 +243,9 @@ class OpenWrtDevice:
     for pkg in packages:
       self._install_package(pkg)
 
-    if not self._provide_long_running_wifi:
+    if self._provide_long_running_wifi or self._skip_init_reboot:
+      self.ssh.open_sftp()
+    else:
       self.reboot()
 
     self._register_syslog_service()

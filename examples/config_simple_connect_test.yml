@@ -1,0 +1,12 @@
+TestBeds:
+  - Name: SampleTestBed
+    Controllers:
+      OpenWrtDevice:
+      - hostname: '100.87.74.8'
+        skip_init_reboot: True
+      - hostname: '100.87.74.38'
+        skip_init_reboot: True
+      AndroidDevice:
+      - serial: '24151FDF6007G5'
+      
+

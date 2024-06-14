@@ -3,3 +3,4 @@ TestBeds:
     Controllers:
       OpenWrtDevice:
       - hostname: '100.87.74.8'
+        skip_init_reboot: True
