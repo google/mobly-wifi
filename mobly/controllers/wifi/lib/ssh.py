@@ -45,6 +45,9 @@ _SFTP_CANNOT_BE_OPENED_DUPLICATEDLY = (
     'Unable to open a new SFTP session while another is active.'
 )
 
+_SIGNAL_CMD_TIMEOUT_SEC = 4
+_WAIT_PROC_EXIT_TIMEOUT_SEC = 30
+
 
 @dataclasses.dataclass
 class CommandResults:
@@ -122,13 +125,16 @@ class SSHProxy:
     ssh_client: the underlying Paramiko SSHClient object.
   """
 
-  def __init__(self,
-               hostname: str,
-               ssh_port: int = 22,
-               username: str = 'root',
-               password: Optional[str] = None,
-               keyfile: Optional[str] = None,
-               allow_agent: bool = False):
+  def __init__(
+      self,
+      hostname: str,
+      ssh_port: int = 22,
+      username: str = 'root',
+      password: Optional[str] = None,
+      keyfile: Optional[str] = None,
+      allow_agent: bool = False,
+      proxy_command: str | None = None,
+  ):
     """Initializes the SSH client instance.
 
     Args:
@@ -138,6 +144,8 @@ class SSHProxy:
       password: the password to log in to test machine.
       keyfile: a local path to a private key file.
       allow_agent: allow use of ssh-agent for underlying ssh_client object.
+      proxy_command: the ProxyCommand string to use when connecting to the
+      remote machine.
     """
     self._hostname = hostname
     self._username = username
@@ -146,6 +154,12 @@ class SSHProxy:
     self._ssh_keyfile = keyfile
     self._allow_agent = allow_agent
     self._port_forward_servers: Dict[int, forward.ForwardServer] = {}
+    self._proxy_command = (
+        paramiko.ProxyCommand(proxy_command)
+        if proxy_command is not None
+        else None
+    )
+
     self._sftp = None
     self.log = mobly_logger.PrefixLoggerAdapter(
         logging.getLogger(),
@@ -189,8 +203,10 @@ class SSHProxy:
         password=self._password,
         allow_agent=self._allow_agent,
         key_filename=self._ssh_keyfile,
+        sock=self._proxy_command,
         timeout=timeout,
-        banner_timeout=banner_timeout)
+        banner_timeout=banner_timeout,
+    )
     if open_sftp:
       self.open_sftp()
 
@@ -907,7 +923,11 @@ class RemotePopen:
       RemoteTimeoutError: if the command did not complete in its given time.
     """
     if self._output_streamer is not None:
-      self._wait_for_remote_process_exit()
+      if not self._wait_for_remote_process_exit(timeout=self._wait_timeout_sec):
+        raise RemoteTimeoutError(
+            self._client,
+            f'Command did not complete in {self._wait_timeout_sec} seconds.',
+        )
       self._stop_streaming_remote_proc_output()
       # Keep similar behavior to Popen, returning empty value when this class is
       # streaming output
@@ -925,7 +945,9 @@ class RemotePopen:
       ) from e
 
   def terminate(
-      self, timeout: int | None = 4, assert_process_exit: bool = False
+      self,
+      timeout: int | None = _SIGNAL_CMD_TIMEOUT_SEC,
+      assert_process_exit: bool = False,
   ) -> None:
     """Attempts to terminate the remote process using SIGTERM.
 
@@ -934,8 +956,7 @@ class RemotePopen:
     still fails, this will raise an error.
 
     Args:
-      timeout: The time in seconds to wait for process to respond to the signal
-        we sent.
+      timeout: The time limit in seconds to send the signal.
       assert_process_exit: If True, this will assert that the remote process
         exits after sending SIGTERM. If False, this will simply send the signal
         and return.
@@ -944,32 +965,11 @@ class RemotePopen:
       SSHRemoteError: If `assert_process_exit=True` and the remote process did
         not exit.
     """
-    self.send_signal(signal_id=signal.SIGTERM, timeout=timeout)
-
-    if not assert_process_exit:
-      return
-
-    if self.poll() is not None:
-      return
-
-    self._client.log.info(
-        'Force killing remote process %d because poll() still returns None',
-        self.pid,
+    self.send_signal(
+        signal_id=signal.SIGTERM,
+        timeout=timeout,
+        assert_process_exit=assert_process_exit,
     )
-    try:
-      self.send_signal(signal_id=signal.SIGKILL, timeout=timeout)
-    # Catch the ExecuteCommandError because it's possible that the remote
-    # process exited on the device while the local process poll() returns None
-    # which is still in the process of stop and cleanup.
-    except (RemoteTimeoutError, SSHRemoteError, ExecuteCommandError):
-      # It's ok that the force kill failed, we only need to check the remote
-      # process exit status.
-      pass
-
-    if self.poll() is None:
-      raise SSHRemoteError(
-          self._client, f'Failed to terminate the remote process {self.pid}.'
-      )
 
   def poll(self) -> Optional[int]:
     """A non-blocking method to check the status of this process.
@@ -982,7 +982,9 @@ class RemotePopen:
     return self._session.recv_exit_status()
 
   def kill(
-      self, timeout: int | None = 4, assert_process_exit: bool = False
+      self,
+      timeout: int | None = _SIGNAL_CMD_TIMEOUT_SEC,
+      assert_process_exit: bool = False,
   ) -> None:
     """Attempts to kill the remote process.
 
@@ -990,8 +992,7 @@ class RemotePopen:
     sending SIGKILL, this will raise an error.
 
     Args:
-      timeout: The time in seconds to wait for process to respond to the signal
-        we sent.
+      timeout: The time limit in seconds to send the signal.
       assert_process_exit: If True, this will assert that the remote process
         exits after sending SIGKILL. If False, this will simply send the signal
         and return.
@@ -1000,26 +1001,77 @@ class RemotePopen:
       SSHRemoteError: If `assert_process_exit=True` and the remote process did
         not exit.
     """
-    self.send_signal(signal_id=signal.SIGKILL, timeout=timeout)
+    self.send_signal(
+        signal_id=signal.SIGKILL,
+        timeout=timeout,
+        assert_process_exit=assert_process_exit,
+    )
 
-    if assert_process_exit and self.poll() is None:
-      raise SSHRemoteError(
-          self._client, f'Failed to force kill the remote process {self.pid}.'
-      )
-
-  def send_signal(self, signal_id: int, timeout: Optional[int] = 4) -> None:
+  def send_signal(
+      self,
+      signal_id: int,
+      timeout: int | None = _SIGNAL_CMD_TIMEOUT_SEC,
+      assert_process_exit: bool = False,
+  ) -> None:
     """Attempts to send a signal to the remote process.
 
     If the `output_file_path` argument is set in the constructor, then this
     method might need additional time to stop streaming output, which will not
     exceed `channel_file_streamer.CHANNEL_FILE_STREAMER_STOP_TIMEOUT_SEC`.
 
+    This supports asserting the process exit after sending the signal.  If
+    `assert_process_exit=True`, this will wait for process exit. If process
+    did not exit after sending a non-SIGKILL signal, this will sending SIGKILL
+    and assert the process exit.
+
     Args:
       signal_id: The ID of the signal. You can use constants defined in the
         "signal" module, e.g. signal.SIGTERM
       timeout: A timeout on blocking read/write operations. Default is 4 because
         we don't want to wait forever if this command fails.
+      assert_process_exit: Whether to assert process exit after sending the
+        signal.
+
+    Raises:
+      SSHRemoteError: If `assert_process_exit=True` and the process did not exit
+        after sending SIGKILL.
     """
+    self._do_send_signal(signal_id=signal_id, timeout=timeout)
+
+    if not assert_process_exit:
+      return
+
+    if self._wait_for_remote_process_exit(timeout=_WAIT_PROC_EXIT_TIMEOUT_SEC):
+      return
+
+    if signal_id == signal.SIGKILL:
+      raise SSHRemoteError(
+          self._client, f'Failed to force kill the remote process {self.pid}.'
+      )
+
+    self._client.log.info(
+        'Remote process pid=%d did not exit, sending escalated signal SIGKILL.',
+        self.pid,
+    )
+    # It's ok that the force kill failed, we only need to check the remote
+    # process exit status.
+    with contextlib.suppress(
+        RemoteTimeoutError, SSHRemoteError, ExecuteCommandError
+    ):
+      self.send_signal(
+          signal_id=signal.SIGKILL, timeout=_SIGNAL_CMD_TIMEOUT_SEC
+      )
+
+    if not self._wait_for_remote_process_exit(
+        timeout=_WAIT_PROC_EXIT_TIMEOUT_SEC
+    ):
+      raise SSHRemoteError(
+          self._client,
+          f'Failed to wait for remote process pid={self.pid} to exit.',
+      )
+
+  def _do_send_signal(self, signal_id: int, timeout: int | None = 4) -> None:
+    """Sends a signal to the remote process."""
     if self.poll() is not None:
       self._stop_streaming_remote_proc_output()
       return
@@ -1087,19 +1139,18 @@ class RemotePopen:
     self._client.log.debug('error: %s', command_results.error)
     return command_results.output.strip()
 
-  def _wait_for_remote_process_exit(self):
+  def _wait_for_remote_process_exit(self, timeout: int | None):
     """Waits for the remote process to exit."""
     deadline_time = None
-    if self._wait_timeout_sec is not None:
-      deadline_time = self._wait_timeout_sec + time.perf_counter()
+    if timeout is not None:
+      deadline_time = timeout + time.perf_counter()
 
     while not self._session.exit_status_ready():
       if (deadline_time is not None and time.perf_counter() > deadline_time):
-        raise RemoteTimeoutError(
-            self._client,
-            f'Command did not complete in {self._wait_timeout_sec} seconds.')
-
+        return False
       time.sleep(1)
+
+    return True
 
   def _stop_streaming_remote_proc_output(self):
     """Stops streaming output of the remote process."""
