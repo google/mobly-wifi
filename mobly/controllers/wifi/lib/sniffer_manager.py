@@ -208,6 +208,8 @@ class SnifferManager:
       self, current_test_info: runtime_test_info.RuntimeTestInfo | None = None
   ):
     """Stops pacaket capture."""
+    if not self.is_alive:
+      return
     self._log.debug('Stopping packet capturing.')
     self._stop_remote_process()
     local_dir = (

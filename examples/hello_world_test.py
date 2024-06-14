@@ -29,11 +29,12 @@ class HelloWorldTest(base_test.BaseTestClass):
     config = wifi_configs.WiFiConfig(channel=36)
     wifi_info = self.openwrt.start_wifi(config=config)
     self.openwrt.log.info(
-        'Now you should be able to see the new started WiFi "%s"',
+        'Now you can connect your device to WiFi "%s" with password "%s"!',
         wifi_info.ssid,
+        wifi_info.password,
     )
     # Sleep 5 seconds for you to manual check.
-    time.sleep(5)
+    time.sleep(60)
  
 if __name__ == '__main__':
   test_runner.main()

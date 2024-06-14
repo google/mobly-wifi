@@ -242,8 +242,6 @@ class OpenWrtDevice:
     for pkg in packages:
       self._install_package(pkg)
 
-    openwrt_g3.install_z_cros_test(self)
-
     if not self._provide_long_running_wifi:
       self.reboot()
 
