@@ -1,0 +1,4 @@
+TestBeds:
+  - Name: SampleTestBed
+    Controllers:
+        OpenWrtDevice: '10.10.10.1'
