@@ -25,9 +25,9 @@ from mobly import runtime_test_info
 from mobly import utils
 from mobly.controllers.android_device_lib.services import base_service
 
-from google3.testing.mobly.platforms.common import file_clipper
 from mobly.controllers.wifi.lib import constants
 from mobly.controllers.wifi.lib import errors
+from mobly.controllers.wifi.lib import file_clipper
 
 # Avoid directly importing cros_device, which causes circular dependencies.
 OpenWrtDevice = Any

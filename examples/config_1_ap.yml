@@ -1,4 +1,5 @@
 TestBeds:
   - Name: SampleTestBed
     Controllers:
-        OpenWrtDevice: '10.10.10.1'
+      OpenWrtDevice:
+      - hostname: '10.10.10.1'
