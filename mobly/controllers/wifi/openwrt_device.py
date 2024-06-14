@@ -29,7 +29,6 @@ from mobly import utils
 from mobly.controllers.android_device_lib import service_manager
 import paramiko
 
-from google3.pyglib import resources
 from mobly.controllers.wifi.lib import ssh as ssh_lib
 from mobly.controllers.wifi.lib import constants
 from mobly.controllers.wifi.lib import device_info_utils
