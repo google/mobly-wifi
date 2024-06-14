@@ -29,7 +29,6 @@ from mobly import utils
 from mobly.controllers.android_device_lib import service_manager
 import paramiko
 
-from google3.pyglib import resources
 from mobly.controllers.wifi.lib import ssh as ssh_lib
 from mobly.controllers.wifi.lib import constants
 from mobly.controllers.wifi.lib import device_info_utils
@@ -43,7 +42,7 @@ from mobly.controllers.wifi.lib.services import system_log_service
 
 MOBLY_CONTROLLER_CONFIG_NAME = 'OpenWrtDevice'
 
-_SSH_KEY_IDENTITY = '~/.ssh/testing_rsa'
+_SSH_KEY_IDENTITY = os.path.expanduser('~/.ssh/testing_rsa')
 _SSH_PORT = 22
 _DEVICE_TAG = MOBLY_CONTROLLER_CONFIG_NAME
 
@@ -242,8 +241,6 @@ class OpenWrtDevice:
 
     for pkg in packages:
       self._install_package(pkg)
-
-    openwrt_g3.install_z_cros_test(self)
 
     if not self._provide_long_running_wifi:
       self.reboot()

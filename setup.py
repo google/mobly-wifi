@@ -24,7 +24,7 @@ install_requires = [
 
 setuptools.setup(
     name='mobly-wifi',
-    version='1.0.1',
+    version='1.0.2.1',
     author='Minghao Li',
     author_email='minghaoli@google.com',
     description='Mobly WiFi controller module for using Python code to operate network devices in Mobly tests.',
