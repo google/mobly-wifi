@@ -333,7 +333,7 @@ class OpenWrtDevice:
     ):
       # ssh connect may fail during certain period of booting
       # process, which is normal. Ignoring these errors.
-      self.log.exception('Ignoring the exception when rebooting.')
+      self.log.debug('Ignoring the exception when rebooting.')
       self._ssh.disconnect()
       return False
 

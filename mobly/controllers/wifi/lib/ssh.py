@@ -695,7 +695,7 @@ class SSHProxy:
       ExecuteCommandError: Raised if not ignoring error and exit code of command
       is greater than 0.
     """
-    self.log.info('Command to execute on remote machine: %s', command)
+    self.log.debug('Command to execute on remote machine: %s', command)
 
     channel_ = self.ssh_client.get_transport().open_session()
     if timeout is not None:
@@ -1094,7 +1094,7 @@ class RemotePopen:
     finally:
       self._stop_streaming_remote_proc_output()
 
-    self._client.log.info(
+    self._client.log.debug(
         'Killed remote process command stdout: <%s>, stderr <%s>, exit code:'
         ' %s',
         command_results.output,
