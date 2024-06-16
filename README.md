@@ -26,7 +26,7 @@ put it at `~/.ssh/testing_rsa`.
 
 ### Write Mobly Device Configs
 
-To use a OpenWrt AP device in Mobly tests, first you need to write a config to specify the information of the device under test. For example:
+To use an OpenWrt AP device in Mobly tests, first you need to write a config to specify the information of the device under test. For example:
 
 **sample_config.yaml**
 
