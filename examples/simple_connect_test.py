@@ -72,15 +72,16 @@ class SimpleConnectTest(base_test.BaseTestClass):
     self.sniffer.stop_packet_capture()
  
   def teardown_test(self):
-    # Collcet test artifacts.
+    # Collcet test artifacts and stop all on Android.
     self.ad.services.create_output_excerpts_all(self.current_test_info)
-    self.openwrt.services.create_output_excerpts_all(self.current_test_info)
-    self.sniffer.stop_packet_capture(self.current_test_info)
-
-    # Stop all.
     self.ad.mbs.wifiDisable()
     self.ad.mbs.wifiClearConfiguredNetworks()
+
+    # Collect artifacts and stop all on OpenWrt devices.
+    self.openwrt.services.create_output_excerpts_all(self.current_test_info)
     self.openwrt.stop_all_wifi()
+    self.sniffer.stop_packet_capture(self.current_test_info)
+
 
 
 if __name__ == '__main__':
