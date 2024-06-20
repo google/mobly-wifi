@@ -39,8 +39,13 @@ from mobly.controllers.wifi.lib import wifi_configs
 class SimpleConnectTest(base_test.BaseTestClass):
  
   def setup_class(self):
+    # Register an Android device.
     self.ad = self.register_controller(android_device)[0]
+
+    # Load Android snippet.
     self.ad.load_snippet('mbs', 'com.google.android.mobly.snippet.bundled')
+
+    # Register OpenWrt devices.
     self.openwrt, self.sniffer = self.register_controller(
         openwrt_device, min_number=2
     )
@@ -61,17 +66,21 @@ class SimpleConnectTest(base_test.BaseTestClass):
     self.ad.log.info('Connected to WiFi "%s"!', self.ad.mbs.wifiGetConnectionInfo()['SSID'])
 
   def setup_test(self):
+    # Stop all.
     self.ad.mbs.wifiDisable()
     self.openwrt.stop_all_wifi()
     self.sniffer.stop_packet_capture()
  
   def teardown_test(self):
+    # Collcet test artifacts.
     self.ad.services.create_output_excerpts_all(self.current_test_info)
+    self.openwrt.services.create_output_excerpts_all(self.current_test_info)
+    self.sniffer.stop_packet_capture(self.current_test_info)
+
+    # Stop all.
     self.ad.mbs.wifiDisable()
     self.ad.mbs.wifiClearConfiguredNetworks()
     self.openwrt.stop_all_wifi()
-    self.openwrt.services.create_output_excerpts_all(self.current_test_info)
-    self.sniffer.stop_packet_capture(self.current_test_info)
 
 
 if __name__ == '__main__':
