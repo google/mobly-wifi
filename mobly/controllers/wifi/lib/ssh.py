@@ -324,8 +324,11 @@ class SSHProxy:
       change_permission: whether to change the permission to 777 on remote
         destination.
     """
-    self.log.info('Pushing dir %s to test machine dir at %s', local_src_dir,
-                  remote_dest_dir)
+    self.log.debug(
+        'Pushing dir %s to test machine dir at %s',
+        local_src_dir,
+        remote_dest_dir,
+    )
     self.make_dirs(remote_dest_dir)
     for (dir_path, _, file_names_list) in os.walk(local_src_dir):
       for file_name in file_names_list:
@@ -506,7 +509,7 @@ class SSHProxy:
           command_results_collector=command_results)
       return command_results
 
-    self.log.info('Remote folder to remove %s does not exist', remote_dir)
+    self.log.debug('Remote folder to remove %s does not exist', remote_dir)
     return CommandResults(exit_code=-1)
 
   def rm_file(self, remote_file: str) -> None:
@@ -526,7 +529,7 @@ class SSHProxy:
         )
       self._sftp.remove(remote_file)
     else:
-      self.log.info('Remote file to remove %s does not exist', remote_file)
+      self.log.debug('Remote file to remove %s does not exist', remote_file)
 
   def make_dirs(self, remote_dir: str) -> None:
     """Recursively makes directories on the remote machine.
@@ -657,7 +660,7 @@ class SSHProxy:
           self,
           f'The file "{remote_path}" to change the permissions does not exist.')
 
-    self.log.info('chmod %o %r', mode, remote_path)
+    self.log.debug('chmod %o %r', mode, remote_path)
     if self._sftp is None:
       raise SSHNotConnectedError(
           ssh=self,
@@ -748,7 +751,7 @@ class SSHProxy:
     Returns:
       The stdin, stdout, and stderr of the executing command.
     """
-    self.log.info('Running command on remote machine: %s', command)
+    self.log.debug('Running command on remote machine: %s', command)
     return self.ssh_client.exec_command(
         command, timeout=timeout, get_pty=get_pty)
 

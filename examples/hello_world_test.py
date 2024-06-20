@@ -36,7 +36,9 @@ class HelloWorldTest(base_test.BaseTestClass):
         wifi_info.password,
     )
     # Sleep a while, you can manually connect your device to the WiFi.
-    time.sleep(60)
+    for _ in range(10):
+      self.openwrt.log.info('Sleeping...')
+      time.sleep(60)
  
 if __name__ == '__main__':
   test_runner.main()
