@@ -185,6 +185,11 @@ class DhcpManager:
     self._local_work_dir = self._device.log_path
     self._remote_work_dir = self._device.remote_work_dir
     self._artifact_time_str = mobly_logger.get_log_file_timestamp()
+    self._provide_long_running_process = False
+
+  def set_provide_long_running_process(self, value: bool):
+    """Sets whether to provide long running WiFi networks."""
+    self._provide_long_running_process = value
 
   def start(self) -> None:
     """Starts this DHCP manager."""
@@ -245,26 +250,39 @@ class DhcpManager:
     return remote_path
 
   def _start_dnsmasq_process(self, config_remote_path: str):
+    """Starts dnsmasq process on the AP device."""
     local_path = self._get_local_path(filename=self._get_log_filename())
     command_elements = [
-        'dnsmasq',
+        constants.DNSMASQ,
         f'--conf-file={config_remote_path}',
-        '--no-daemon',
     ]
-    command = ' '.join(command_elements)
-    self._remote_process = self._device.ssh.start_remote_process(
-        command, get_pty=True, output_file_path=local_path
-    )
-    self._log.debug(
-        'Started dnsmasq remote process %d on the AP device.',
-        self._remote_process.pid,
-    )
+    if self._provide_long_running_process:
+      remote_log_file = self._get_remote_path(self._get_log_filename())
+      command_elements.extend(['>', remote_log_file, '2>&1'])
+      command = ' '.join(command_elements)
+      self._device.ssh.execute_command(
+          command, timeout=constants.CMD_SHORT_TIMEOUT.total_seconds()
+      )
+      self._log.debug('Started dnsmasq remote process on the AP device.')
+    else:
+      command_elements.append('--no-daemon')
+      command = ' '.join(command_elements)
+      self._remote_process = self._device.ssh.start_remote_process(
+          command, get_pty=True, output_file_path=local_path
+      )
+      self._log.debug(
+          'Started dnsmasq remote process %d on the AP device.',
+          self._remote_process.pid,
+      )
 
   def __del__(self):
     self.stop()
 
   def stop(self):
     """Stops the DHCP server instance on the AP device."""
+    if self._provide_long_running_process:
+      return
+
     if self._subnet_id is not None:
       _subnet_id_generator.release(self._subnet_id)
       self._subnet_id = None

@@ -85,6 +85,7 @@ class WiFiManager:
             )
         },
     )
+    self._provide_long_running_wifi = False
 
   def initialize(self):
     """Initializes the AP device to be ready for starting WiFi networks.
@@ -94,6 +95,11 @@ class WiFiManager:
     # Kill any existing hostapd instances.
     self._device.ssh.execute_command(
         command=constants.Commands.KILLALL.format(name=constants.HOSTAPD),
+        timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
+        ignore_error=True,
+    )
+    self._device.ssh.execute_command(
+        command=constants.Commands.KILLALL.format(name=constants.DNSMASQ),
         timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
         ignore_error=True,
     )
@@ -128,6 +134,10 @@ class WiFiManager:
   def is_alive(self) -> bool:
     """True if there are any running WiFi networks, False otherwise."""
     return bool(self._running_wifis)
+
+  def set_provide_long_running_wifi(self, provide_long_running_wifi: bool):
+    """Sets whether to provide long running WiFi networks."""
+    self._provide_long_running_wifi = provide_long_running_wifi
 
   def start_wifi(
       self, config: wifi_configs.WiFiConfig
@@ -170,6 +180,9 @@ class WiFiManager:
         interface=interface,
         wifi_config=config,
     )
+    hostapd_manager_obj.set_provide_long_running_process(
+        self._provide_long_running_wifi
+    )
     wifi_info = hostapd_manager_obj.start()
     self._running_wifis[wifi_id] = _WiFiComponents(
         info=wifi_info,
@@ -181,6 +194,9 @@ class WiFiManager:
     if config.access_wan_through_nat:
       dhcp_manager_obj = dhcp_manager.DhcpManager(
           device=self._device, wifi_id=wifi_id, iface=interface
+      )
+      dhcp_manager_obj.set_provide_long_running_process(
+          self._provide_long_running_wifi
       )
       dhcp_manager_obj.start()
       self._running_wifis[wifi_id].dhcp_manager = dhcp_manager_obj
@@ -256,10 +272,13 @@ class WiFiManager:
 
     # TODO: Temp workaround for new firewall rule.
     if utils.is_new_firewall_rule_version(self._device.device_info['release']):
-      if access_wan_through_nat:
+      if access_wan_through_nat and not utils.is_using_custom_image(
+          self._device
+      ):
         raise errors.ConfigError(
-            f'Config access_wan_through_nat=True is not supported under current'
-            f"OpenWrt version {self._device.device_info['release']}"
+            'Config access_wan_through_nat=True is not supported under current'
+            'official OpenWrt image and version'
+            f' {self._device.device_info["release"]}'
         )
       return
 

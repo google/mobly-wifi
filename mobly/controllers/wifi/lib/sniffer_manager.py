@@ -129,8 +129,7 @@ class SnifferManager:
         timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
     )
 
-    if self._device.ssh.is_file(_REMOTE_FILE_PATH):
-      self._device.ssh.rm_file(_REMOTE_FILE_PATH)
+    self._remove_capture_file()
 
     capture_filter = ''
     if capture_config.ignore_qos_data_frames:
@@ -143,6 +142,10 @@ class SnifferManager:
         ),
         get_pty=True,
     )
+
+  def _remove_capture_file(self):
+    if self._device.ssh.is_file(_REMOTE_FILE_PATH):
+      self._device.ssh.rm_file(_REMOTE_FILE_PATH)
 
   def _gen_iw_set_freq_cmd(
       self,
@@ -212,12 +215,10 @@ class SnifferManager:
       return
     self._log.debug('Stopping packet capturing.')
     self._stop_remote_process()
-    local_dir = (
-        current_test_info.output_path
-        if current_test_info is not None
-        else self._device.log_path
-    )
-    self._pull_capture_file(local_dir)
+    if current_test_info is not None:
+      local_dir = current_test_info.output_path
+      self._pull_capture_file(local_dir)
+    self._remove_capture_file()
     self._log.debug('Stopped packet capturing.')
 
   def _stop_remote_process(self):

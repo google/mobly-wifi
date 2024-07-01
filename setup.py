@@ -19,12 +19,14 @@ import setuptools
 install_requires = [
     'mobly>=1.12.2',
     'immutabledict',
-    'paramiko',
+    'paramiko>=2.10.4',
+    'pyzmq>=15.0.0',
+    'packaging',
 ]
 
 setuptools.setup(
     name='mobly-wifi',
-    version='1.0.2.4',
+    version='1.0.2.5',
     author='Minghao Li',
     author_email='minghaoli@google.com',
     description='Mobly WiFi controller module for using Python code to operate network devices in Mobly tests.',
