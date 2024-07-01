@@ -42,7 +42,9 @@ from mobly.controllers.wifi.lib.services import system_log_service
 
 MOBLY_CONTROLLER_CONFIG_NAME = 'OpenWrtDevice'
 
-_SSH_KEY_IDENTITY = os.path.expanduser('~/.ssh/testing_rsa')
+_SSH_KEY_IDENTITY = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'data/testing_rsa'
+)
 _SSH_PORT = 22
 _DEVICE_TAG = MOBLY_CONTROLLER_CONFIG_NAME
 
