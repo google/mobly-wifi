@@ -1,0 +1,5 @@
+mobly >= 1.12.1
+immutabledict
+paramiko >= 2.10.4
+pyzmq >= 15.0.0
+packaging

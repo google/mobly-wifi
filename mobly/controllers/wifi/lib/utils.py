@@ -17,9 +17,13 @@
 import datetime
 import string
 import time
-from typing import Callable
+from typing import Any, Callable
 
 from packaging import version
+
+from mobly.controllers.wifi.lib import constants
+
+OpenWrtDevice = Any
 
 _OPENWRT_NEW_FIREWALL_RULE_VERSION = version.parse('22.03')
 
@@ -65,3 +69,13 @@ def is_new_firewall_rule_version(version_number: str) -> bool:
 def is_using_openwrt_snapshot_image(release: str) -> bool:
   """Returns True if the image is built against SNAPSHOT, False otherwise."""
   return release == 'SNAPSHOT'
+
+
+def is_using_custom_image(device: 'OpenWrtDevice') -> bool:
+  """Returns True if the image is using a custom image, False otherwise."""
+  output = device.ssh.execute_command(
+      command=f'ls {constants.CURSTOM_RELEASE_INFO_FILE_PATH}',
+      timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
+      ignore_error=True,
+  )
+  return output.strip() == constants.CURSTOM_RELEASE_INFO_FILE_PATH

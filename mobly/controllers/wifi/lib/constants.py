@@ -173,8 +173,11 @@ class Commands(enum.StrEnum):
 # The network interface to for the AP device to connect with wide area network.
 WAN_INTERFACE = 'br-lan'
 
-# Constant fot the name of hostapd.
+# Constant for the name of hostapd.
 HOSTAPD = 'hostapd'
+
+# Constant for the name of dnsmasq.
+DNSMASQ = 'dnsmasq'
 
 
 # The AP device SSH username.
@@ -189,6 +192,7 @@ OPENWRT_PACKAGE_SFTP = 'openssh-sftp-server'
 OPENWRT_PACKAGE_SUDO = 'sudo'
 OPENWRT_PACKAGE_HOSTAPD = 'hostapd'
 OPENWRT_PACKAGE_TCPDUMP = 'tcpdump'
+OPENWRT_PACKAGE_IPERF3 = 'iperf3'
 
 # Required packages when using an OpenWrt image built against snapshot.
 # * Do NOT include `iptables` because snapshot images have limitation on
@@ -198,6 +202,7 @@ REQUIRED_PACKAGES_SNAPSHOT = (
     OPENWRT_PACKAGE_SUDO,
     OPENWRT_PACKAGE_HOSTAPD,
     OPENWRT_PACKAGE_TCPDUMP,
+    OPENWRT_PACKAGE_IPERF3,
 )
 
 # Required packages when using an official OpenWrt image.
@@ -207,6 +212,7 @@ REQUIRED_PACKAGES_OFFICIAL = (
     OPENWRT_PACKAGE_SUDO,
     OPENWRT_PACKAGE_IPTABLES,
     OPENWRT_PACKAGE_TCPDUMP,
+    OPENWRT_PACKAGE_IPERF3,
 )
 
 DEVICE_INFO_PATTERN = re.compile(

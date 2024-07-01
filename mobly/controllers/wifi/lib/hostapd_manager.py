@@ -102,6 +102,15 @@ _DEFAULT_VHT_CAPAB = {
     ),
 }
 
+# We set fragm_threshold to -1 because the AP might not support setting
+# fragmentation threshold when it is not using our custom OpenWrt image. And I
+# did not find a way to dynamically check whether setting fragmentation
+# threshold is supported or not.
+_IS_CUSTOM_OPENWRT_TO_DEFAULT_FRAGM_THRESHOLD = {
+    True: 2346,
+    False: -1,
+}
+
 
 def _get_default_ht_capab(
     wifi_config: wifi_configs.WiFiConfig,
@@ -176,14 +185,19 @@ class HostapdConfig:
 
   _raw: dict[str, str]
 
-  def __init__(self, interface: str, dfs_channels: set[int]):
+  def __init__(
+      self, interface: str, dfs_channels: set[int], is_custom_openwrt: bool
+  ):
     self._dfs_channels = dfs_channels
     self._raw = {}
     self.update('logger_syslog', '-1')
     self.update('logger_syslog_level', '0')
     self.update('rts_threshold', '-1')
-    self.update('fragm_threshold', '2346')
     self.update('driver', 'nl80211')
+    self.update(
+        'fragm_threshold',
+        str(_IS_CUSTOM_OPENWRT_TO_DEFAULT_FRAGM_THRESHOLD[is_custom_openwrt]),
+    )
     self.set_interface(interface)
 
   def update(self, key: str, value: str):
@@ -389,6 +403,11 @@ class HostapdManager:
     )
     self._local_work_dir = self._device.log_path
     self._remote_work_dir = self._device.remote_work_dir
+    self._provide_long_running_process = False
+
+  def set_provide_long_running_process(self, value: bool):
+    """Sets whether to provide long running WiFi networks."""
+    self._provide_long_running_process = value
 
   def start(self) -> wifi_configs.WifiInfo:
     """Starts this hostapd manager instance."""
@@ -411,6 +430,7 @@ class HostapdManager:
     self._hostapd_config = HostapdConfig(
         interface=self._interface,
         dfs_channels=dfs_channels,
+        is_custom_openwrt=utils.is_using_custom_image(self._device),
     )
     self._hostapd_config.update_from_wifi_config(self._wifi_config)
 
@@ -450,10 +470,18 @@ class HostapdManager:
     command = constants.Commands.HOSTAPD_START.format(
         conf_path=conf_remote_path,
     )
-    proc = self._device.ssh.start_remote_process(
-        command, get_pty=True, output_file_path=log_file_path
-    )
-    self._remote_process = proc
+
+    if self._provide_long_running_process:
+      remote_log_path = self._get_remote_path(self._get_log_filename())
+      command = f'{command} > {remote_log_path} 2>&1 &'
+      self._device.ssh.execute_command(
+          command, timeout=constants.CMD_SHORT_TIMEOUT.total_seconds()
+      )
+    else:
+      proc = self._device.ssh.start_remote_process(
+          command, get_pty=True, output_file_path=log_file_path
+      )
+      self._remote_process = proc
 
     self._hostapd_config = typing.cast(HostapdConfig, self._hostapd_config)
     wait_timeout = (
@@ -475,17 +503,18 @@ class HostapdManager:
 
   def _is_wifi_ready(self):
     """Returns whether the WiFi is ready."""
-    if self._remote_process is None:
-      raise errors.HostapdStartError(
-          'Hostapd process is not set. Please check whether hostapd object'
-          ' has not been started or is already stopped.'
-      )
-    if self._remote_process.poll() is not None:
-      raise errors.HostapdStartError(
-          'Hostapd process has exited unexpectedly on the AP device. Please'
-          f' check the hostapd log file {self._get_log_filename()} and conf'
-          f' file {self._get_conf_filename()}'
-      )
+    if not self._provide_long_running_process:
+      if self._remote_process is None:
+        raise errors.HostapdStartError(
+            'Hostapd process is not set. Please check whether hostapd object'
+            ' has not been started or is already stopped.'
+        )
+      if self._remote_process.poll() is not None:
+        raise errors.HostapdStartError(
+            'Hostapd process has exited unexpectedly on the AP device. Please'
+            f' check the hostapd log file {self._get_log_filename()} and conf'
+            f' file {self._get_conf_filename()}'
+        )
 
     stdout = self._device.ssh.execute_command(
         command=constants.Commands.IP_LINK_SHOW.format(
@@ -501,6 +530,9 @@ class HostapdManager:
 
   def stop(self):
     """Stops the remote hostapd process."""
+    if self._provide_long_running_process:
+      return
+
     if self._remote_process is None:
       return
 

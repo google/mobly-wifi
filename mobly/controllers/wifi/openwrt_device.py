@@ -42,7 +42,9 @@ from mobly.controllers.wifi.lib.services import system_log_service
 
 MOBLY_CONTROLLER_CONFIG_NAME = 'OpenWrtDevice'
 
-_SSH_KEY_IDENTITY = os.path.expanduser('~/.ssh/testing_rsa')
+_SSH_KEY_IDENTITY = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'data/testing_rsa'
+)
 _SSH_PORT = 22
 _DEVICE_TAG = MOBLY_CONTROLLER_CONFIG_NAME
 
@@ -172,12 +174,30 @@ class OpenWrtDevice:
     self._wifi_id_counter = itertools.count(0)
 
     self._ssh = self._create_ssh_connection()
-    self._wifi_manager = wifi_manager.WiFiManager(device=self)
+    self._wifi_manager_obj = None
     self.services = service_manager.ServiceManager(device=self)
-    self._sniffer_manager = sniffer_manager.SnifferManager(device=self)
+    self._sniffer_manager_obj = None
 
   def __repr__(self) -> str:
     return f'<{_DEVICE_TAG}|{self.serial}>'
+
+  @property
+  def _wifi_manager(self) -> wifi_manager.WiFiManager:
+    """Lazy initialization of the WiFi manager object."""
+    if self._wifi_manager_obj is None:
+      self._wifi_manager_obj = wifi_manager.WiFiManager(device=self)
+      self._wifi_manager_obj.set_provide_long_running_wifi(
+          self._provide_long_running_wifi
+      )
+      self._wifi_manager_obj.initialize()
+    return self._wifi_manager_obj
+
+  @property
+  def _sniffer_manager(self) -> sniffer_manager.SnifferManager:
+    """Lazy initialization of the sniffer manager object."""
+    if self._sniffer_manager_obj is None:
+      self._sniffer_manager_obj = sniffer_manager.SnifferManager(device=self)
+    return self._sniffer_manager_obj
 
   def _create_ssh_connection(self) -> ssh_lib.SSHProxy:
     if self._password is None:
@@ -244,7 +264,8 @@ class OpenWrtDevice:
       self._install_package(pkg)
 
     if self._provide_long_running_wifi or self._skip_init_reboot:
-      self.ssh.open_sftp()
+      if self._is_sftp_installed:
+        self.ssh.open_sftp()
     else:
       self.reboot()
 
@@ -287,13 +308,14 @@ class OpenWrtDevice:
 
   @contextlib.contextmanager
   def _handle_reboot(self) -> Iterator[None]:
-    self._wifi_manager.teardown()
+    if self._wifi_manager_obj:
+      self._wifi_manager_obj.teardown()
+      self._wifi_manager_obj = None
     try:
       yield
     finally:
       self._ssh.disconnect()
       self._wait_for_boot_completion()
-      self._wifi_manager.initialize()
 
   def _wait_for_boot_completion(self) -> None:
     """Waits for a ssh connection can be reestablished.
@@ -424,15 +446,19 @@ class OpenWrtDevice:
   def start_wifi(
       self, config: wifi_configs.WiFiConfig
   ) -> wifi_configs.WifiInfo:
-    if self._sniffer_manager.is_alive:
+    if self._sniffer_manager_obj:
       raise Error(_ERR_USE_AS_BOTH_AP_AND_SNIFFER.format(device=self))
     return self._wifi_manager.start_wifi(config)
 
   def stop_wifi(self, wifi_info: wifi_configs.WifiInfo) -> None:
-    self._wifi_manager.stop_wifi(wifi_info)
+    if not self._wifi_manager_obj:
+      return
+    self._wifi_manager_obj.stop_wifi(wifi_info)
 
   def stop_all_wifi(self) -> None:
-    self._wifi_manager.stop_all_wifi()
+    if not self._wifi_manager_obj:
+      return
+    self._wifi_manager_obj.stop_all_wifi()
 
   def get_all_known_stations(
       self, wifi_info: wifi_configs.WifiInfo
@@ -503,7 +529,7 @@ class OpenWrtDevice:
     """
     if sum([wifi_config is not None, freq_config is not None]) != 1:
       raise Error(_ERR_START_PACKET_CAPTURE_ARG_ERROR.format(device=self))
-    if self._wifi_manager.is_alive:
+    if self._wifi_manager_obj is not None:
       raise Error(_ERR_USE_AS_BOTH_AP_AND_SNIFFER.format(device=self))
 
     if wifi_config is not None:
@@ -516,16 +542,23 @@ class OpenWrtDevice:
       self, current_test_info: runtime_test_info.RuntimeTestInfo | None = None
   ):
     """Stops pacaket capture."""
-    self._sniffer_manager.stop_capture(current_test_info=current_test_info)
+    if self._sniffer_manager_obj is None:
+      return
+    self._sniffer_manager_obj.stop_capture(current_test_info=current_test_info)
 
   def get_capture_file(self) -> str | None:
     """Gets the full path of the last capture."""
-    return self._sniffer_manager.get_capture_file()
+    if self._sniffer_manager_obj is None:
+      return
+    return self._sniffer_manager_obj.get_capture_file()
 
   def teardown(self):
     """Tears the device object down."""
     self.log.info('Tearing down the controller.')
-    self._sniffer_manager.teardown()
-    if not self._provide_long_running_wifi:
-      self._wifi_manager.teardown()
+    if self._sniffer_manager_obj:
+      self._sniffer_manager_obj.teardown()
+      self._sniffer_manager_obj = None
+    if self._wifi_manager_obj:
+      self._wifi_manager_obj.teardown()
+      self._wifi_manager_obj = None
     self._ssh.disconnect()
