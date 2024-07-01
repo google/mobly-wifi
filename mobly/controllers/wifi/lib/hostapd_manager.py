@@ -354,6 +354,7 @@ class HostapdManager:
       base_logger: (
           logging.Logger | mobly_logger.PrefixLoggerAdapter | None
       ) = None,
+      provide_long_running_wifi: bool = False,
   ):
     """Constructor.
 
@@ -376,6 +377,7 @@ class HostapdManager:
     self._hostapd_config = None
     self._wifi_info = None
     self._remote_process = None
+    self._provide_long_running_wifi = provide_long_running_wifi
     self._identifier = f'wifi{self._wifi_id},{self._interface}'
 
     base_logger = base_logger or device.log
@@ -450,10 +452,18 @@ class HostapdManager:
     command = constants.Commands.HOSTAPD_START.format(
         conf_path=conf_remote_path,
     )
-    proc = self._device.ssh.start_remote_process(
-        command, get_pty=True, output_file_path=log_file_path
-    )
-    self._remote_process = proc
+    if self._provide_long_running_wifi:
+      filename = self._get_log_filename()
+      remote_log_path = self._get_remote_path(filename)
+      self._device.ssh.execute_command(
+          command=f'{command} > {remote_log_path} 2>&1 &',
+          timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
+      )
+    else:
+      proc = self._device.ssh.start_remote_process(
+          command, get_pty=True, output_file_path=log_file_path
+      )
+      self._remote_process = proc
 
     self._hostapd_config = typing.cast(HostapdConfig, self._hostapd_config)
     wait_timeout = (
@@ -475,17 +485,18 @@ class HostapdManager:
 
   def _is_wifi_ready(self):
     """Returns whether the WiFi is ready."""
-    if self._remote_process is None:
-      raise errors.HostapdStartError(
-          'Hostapd process is not set. Please check whether hostapd object'
-          ' has not been started or is already stopped.'
-      )
-    if self._remote_process.poll() is not None:
-      raise errors.HostapdStartError(
-          'Hostapd process has exited unexpectedly on the AP device. Please'
-          f' check the hostapd log file {self._get_log_filename()} and conf'
-          f' file {self._get_conf_filename()}'
-      )
+    if not self._provide_long_running_wifi:
+      if self._remote_process is None:
+        raise errors.HostapdStartError(
+            'Hostapd process is not set. Please check whether hostapd object'
+            ' has not been started or is already stopped.'
+        )
+      if self._remote_process.poll() is not None:
+        raise errors.HostapdStartError(
+            'Hostapd process has exited unexpectedly on the AP device. Please'
+            f' check the hostapd log file {self._get_log_filename()} and conf'
+            f' file {self._get_conf_filename()}'
+        )
 
     stdout = self._device.ssh.execute_command(
         command=constants.Commands.IP_LINK_SHOW.format(

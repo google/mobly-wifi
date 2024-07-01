@@ -172,7 +172,9 @@ class OpenWrtDevice:
     self._wifi_id_counter = itertools.count(0)
 
     self._ssh = self._create_ssh_connection()
-    self._wifi_manager = wifi_manager.WiFiManager(device=self)
+    self._wifi_manager = wifi_manager.WiFiManager(
+        device=self, provide_long_running_wifi=self._provide_long_running_wifi
+    )
     self.services = service_manager.ServiceManager(device=self)
     self._sniffer_manager = sniffer_manager.SnifferManager(device=self)
 
@@ -421,6 +423,9 @@ class OpenWrtDevice:
       if change_permission:
         self.ssh.execute_command(f'chmod 777 {remote_dest_filename}')
 
+  def reset_router(self):
+    self._wifi_manager.initialize()
+
   def start_wifi(
       self, config: wifi_configs.WiFiConfig
   ) -> wifi_configs.WifiInfo:
@@ -526,6 +531,5 @@ class OpenWrtDevice:
     """Tears the device object down."""
     self.log.info('Tearing down the controller.')
     self._sniffer_manager.teardown()
-    if not self._provide_long_running_wifi:
-      self._wifi_manager.teardown()
+    self._wifi_manager.teardown()
     self._ssh.disconnect()

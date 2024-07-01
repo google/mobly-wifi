@@ -71,11 +71,14 @@ class WiFiManager:
 
   _running_wifis: dict[int, _WiFiComponents]
 
-  def __init__(self, device: 'OpenWrtDevice'):
+  def __init__(
+      self, device: 'OpenWrtDevice', provide_long_running_wifi: bool = False
+  ):
     self._device = device
     self._id_counter = device.wifi_id_counter
     self._running_wifis = {}
     self._wan_interface = constants.WAN_INTERFACE
+    self._provide_long_running_wifi = provide_long_running_wifi
 
     self._log = mobly_logger.PrefixLoggerAdapter(
         device.log,
@@ -169,6 +172,7 @@ class WiFiManager:
         phy=phy,
         interface=interface,
         wifi_config=config,
+        provide_long_running_wifi=self._provide_long_running_wifi,
     )
     wifi_info = hostapd_manager_obj.start()
     self._running_wifis[wifi_id] = _WiFiComponents(
