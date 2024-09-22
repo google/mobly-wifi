@@ -85,7 +85,6 @@ class WiFiManager:
             )
         },
     )
-    self._provide_long_running_wifi = False
 
   def initialize(self):
     """Initializes the AP device to be ready for starting WiFi networks.
@@ -95,11 +94,6 @@ class WiFiManager:
     # Kill any existing hostapd instances.
     self._device.ssh.execute_command(
         command=constants.Commands.KILLALL.format(name=constants.HOSTAPD),
-        timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
-        ignore_error=True,
-    )
-    self._device.ssh.execute_command(
-        command=constants.Commands.KILLALL.format(name=constants.DNSMASQ),
         timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
         ignore_error=True,
     )
@@ -134,10 +128,6 @@ class WiFiManager:
   def is_alive(self) -> bool:
     """True if there are any running WiFi networks, False otherwise."""
     return bool(self._running_wifis)
-
-  def set_provide_long_running_wifi(self, provide_long_running_wifi: bool):
-    """Sets whether to provide long running WiFi networks."""
-    self._provide_long_running_wifi = provide_long_running_wifi
 
   def start_wifi(
       self, config: wifi_configs.WiFiConfig
@@ -180,9 +170,6 @@ class WiFiManager:
         interface=interface,
         wifi_config=config,
     )
-    hostapd_manager_obj.set_provide_long_running_process(
-        self._provide_long_running_wifi
-    )
     wifi_info = hostapd_manager_obj.start()
     self._running_wifis[wifi_id] = _WiFiComponents(
         info=wifi_info,
@@ -195,9 +182,6 @@ class WiFiManager:
       dhcp_manager_obj = dhcp_manager.DhcpManager(
           device=self._device, wifi_id=wifi_id, iface=interface
       )
-      dhcp_manager_obj.set_provide_long_running_process(
-          self._provide_long_running_wifi
-      )
       dhcp_manager_obj.start()
       self._running_wifis[wifi_id].dhcp_manager = dhcp_manager_obj
 
@@ -206,6 +190,8 @@ class WiFiManager:
         action=constants.IptablesAction.INSERT,
         access_wan_through_nat=config.access_wan_through_nat,
     )
+
+    self._set_txpower(interface, config)
 
     self._log.debug(
         'Started WiFi network %d with config: %s', wifi_info.id, config
@@ -222,6 +208,19 @@ class WiFiManager:
     )
 
     return wifi_info
+
+  def _set_txpower(self, interface: str, config: wifi_configs.WiFiConfig):
+    """Sets the transmit power of the wireless interface on the AP device."""
+    if config.maximum_txpower_dbm is None:
+      return
+    txpower_mbm = config.maximum_txpower_dbm * 100
+    self._device.ssh.execute_command(
+        command=constants.Commands.IW_DEV_SET_MAXIMUM_TXPOWER.format(
+            interface=interface,
+            txpower_mbm=txpower_mbm,
+        ),
+        timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
+    )
 
   def _print_debug_info_before_starting_wifi(self):
     """Prints debug information before starting each WiFi network."""

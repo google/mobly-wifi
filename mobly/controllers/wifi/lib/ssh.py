@@ -1097,7 +1097,7 @@ class RemotePopen:
     finally:
       self._stop_streaming_remote_proc_output()
 
-    self._client.log.debug(
+    self._client.log.info(
         'Killed remote process command stdout: <%s>, stderr <%s>, exit code:'
         ' %s',
         command_results.output,

@@ -27,7 +27,7 @@ from mobly.controllers.wifi.lib.encryption import base_encryption_config
 from mobly.controllers.wifi.lib.encryption import wpa
 
 
-# TODO(b/310813723): move Ieee80211Standards from constants to this module.
+# TODO: move Ieee80211Standards from constants to this module.
 Ieee80211Standards = constants.Ieee80211Standards
 
 # For these channels, they support both HT40+ and HT40- so we cannot auto detect
@@ -227,6 +227,12 @@ class WiFiConfig:
   # the WAN and it assumes there's a DHCP server running in the WAN.
   access_wan_through_nat: bool = True
 
+  # Specifies the maximum desired transmission power in dBm. The actual txpower
+  # used depends on regulatory requirements.
+  # This must be a positive integer.
+  # Reference value: by default 23 dBm will be used for channel 36 in US.
+  maximum_txpower_dbm: int | None = None
+
   custom_hostapd_configs: Mapping[str, str] = dataclasses.field(
       default_factory=dict
   )
@@ -254,6 +260,11 @@ class WiFiConfig:
 
   def _check_validity(self):
     """Checks whether the configurations are valid."""
+    self._check_frequency_configs_validity()
+    self._check_txpower_config_validity()
+
+  def _check_frequency_configs_validity(self):
+    """Checks the frequency related configurations."""
     channel = self.channel
     if channel not in constants.CHANNEL_TO_FREQUENCY:
       raise errors.ConfigError(
@@ -315,6 +326,14 @@ class WiFiConfig:
             f'Got unsupported channel width {self.width} with standard'
             f' {self.standard}.'
         )
+
+  def _check_txpower_config_validity(self):
+    """Checks the txpower configurations."""
+    if self.maximum_txpower_dbm is not None and self.maximum_txpower_dbm <= 0:
+      raise errors.ConfigError(
+          'maximum_txpower_dbm must be positive integers, got'
+          f' {self.maximum_txpower_dbm}.'
+      )
 
 
 @dataclasses.dataclass
@@ -390,9 +409,12 @@ class PcapConfig:
   """Configurations for controlling the packet capture process.
 
   Attributes:
+    keep_latest_packets: True to ignore old packets if the capture file exceeds
+      a default size limit. False to ignore new packets.
     ignore_qos_data_frames: Whether to ignore QoS data frames. Note that an
       exception is that this will not ignore EAPOL frames which are used for
       WPA2-PSK authentication.
   """
 
-  ignore_qos_data_frames: bool = True
+  keep_latest_packets: bool = True
+  ignore_qos_data_frames: bool = False

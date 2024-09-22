@@ -207,7 +207,7 @@ class HostapdConfig:
     """Updates this object according to the `WiFiConfig` object."""
     self.set_ssid(wifi_config.ssid)
 
-    # TODO(b/310813723): Better API is returning a dict / hostapd_conf and merge
+    # TODO: Better API is returning a dict / hostapd_conf and merge
     # it.
     wifi_config.encryption_config.update_hostapd_conf(hostapd_conf=self)
     self.set_channel(wifi_config.channel)
@@ -403,11 +403,6 @@ class HostapdManager:
     )
     self._local_work_dir = self._device.log_path
     self._remote_work_dir = self._device.remote_work_dir
-    self._provide_long_running_process = False
-
-  def set_provide_long_running_process(self, value: bool):
-    """Sets whether to provide long running WiFi networks."""
-    self._provide_long_running_process = value
 
   def start(self) -> wifi_configs.WifiInfo:
     """Starts this hostapd manager instance."""
@@ -423,7 +418,7 @@ class HostapdManager:
   def _start(self) -> wifi_configs.WifiInfo:
     """Starts a hostapd process using given configs on the AP device."""
     dfs_channels = iw_utils.get_all_dfs_channels(self._phy)
-    self._device.log.debug(
+    self._log.debug(
         'All DFS channels on phy %s: %s', self._phy.name, sorted(dfs_channels)
     )
 
@@ -470,18 +465,10 @@ class HostapdManager:
     command = constants.Commands.HOSTAPD_START.format(
         conf_path=conf_remote_path,
     )
-
-    if self._provide_long_running_process:
-      remote_log_path = self._get_remote_path(self._get_log_filename())
-      command = f'{command} > {remote_log_path} 2>&1 &'
-      self._device.ssh.execute_command(
-          command, timeout=constants.CMD_SHORT_TIMEOUT.total_seconds()
-      )
-    else:
-      proc = self._device.ssh.start_remote_process(
-          command, get_pty=True, output_file_path=log_file_path
-      )
-      self._remote_process = proc
+    proc = self._device.ssh.start_remote_process(
+        command, get_pty=True, output_file_path=log_file_path
+    )
+    self._remote_process = proc
 
     self._hostapd_config = typing.cast(HostapdConfig, self._hostapd_config)
     wait_timeout = (
@@ -499,22 +486,21 @@ class HostapdManager:
           f' {self._get_log_filename()} and config {self._get_conf_filename()}.'
       )
 
-    self._device.log.debug('Started remote hostapd process.')
+    self._log.debug('Started remote hostapd process.')
 
   def _is_wifi_ready(self):
     """Returns whether the WiFi is ready."""
-    if not self._provide_long_running_process:
-      if self._remote_process is None:
-        raise errors.HostapdStartError(
-            'Hostapd process is not set. Please check whether hostapd object'
-            ' has not been started or is already stopped.'
-        )
-      if self._remote_process.poll() is not None:
-        raise errors.HostapdStartError(
-            'Hostapd process has exited unexpectedly on the AP device. Please'
-            f' check the hostapd log file {self._get_log_filename()} and conf'
-            f' file {self._get_conf_filename()}'
-        )
+    if self._remote_process is None:
+      raise errors.HostapdStartError(
+          'Hostapd process is not set. Please check whether hostapd object'
+          ' has not been started or is already stopped.'
+      )
+    if self._remote_process.poll() is not None:
+      raise errors.HostapdStartError(
+          'Hostapd process has exited unexpectedly on the AP device. Please'
+          f' check the hostapd log file {self._get_log_filename()} and conf'
+          f' file {self._get_conf_filename()}'
+      )
 
     stdout = self._device.ssh.execute_command(
         command=constants.Commands.IP_LINK_SHOW.format(
@@ -530,13 +516,10 @@ class HostapdManager:
 
   def stop(self):
     """Stops the remote hostapd process."""
-    if self._provide_long_running_process:
-      return
-
     if self._remote_process is None:
       return
 
-    self._device.log.debug(
+    self._log.debug(
         'Stopping hostapd process %d.',
         self._remote_process.pid,
     )

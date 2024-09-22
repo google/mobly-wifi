@@ -1,5 +1,3 @@
-#!/usr/bin/python
-#
 # Copyright 2024 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -25,9 +23,9 @@ from mobly import runtime_test_info
 from mobly import utils
 from mobly.controllers.android_device_lib.services import base_service
 
+from mobly.controllers.wifi.lib import file_clipper
 from mobly.controllers.wifi.lib import constants
 from mobly.controllers.wifi.lib import errors
-from mobly.controllers.wifi.lib import file_clipper
 
 # Avoid directly importing cros_device, which causes circular dependencies.
 OpenWrtDevice = Any

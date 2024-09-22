@@ -41,6 +41,9 @@ _BAND_RE_GROUP_NUM = 'num'
 _PHY_NAME_RE = re.compile(r'Wiphy (?P<name>\S+)')
 _PHY_NAME_RE_GROUP_NAME = 'name'
 
+_PHY_INDEX_RE = re.compile(r'wiphy index: (?P<phyindex>\d+)')
+_PHY_INDEX_RE_GROUP_PHYINDEX = 'phyindex'
+
 _PREFIX_TAB_CHARACTERS_RE = re.compile(r'^\t+')
 
 _TEXT_LABEL_FREQUENCIES = 'Frequencies:'
@@ -115,6 +118,7 @@ class Phy:
   """Wireless hardware device information in the `iw phy` output."""
 
   name: str
+  phyindex: int
   bands: Sequence[Band]
 
 
@@ -362,10 +366,13 @@ def get_all_phys(device: 'OpenWrtDevice') -> Sequence[Phy]:
           f'Did not find Wiphy name in node: "{node.text}"'
       )
     phy_name = phy_match.group(_PHY_NAME_RE_GROUP_NAME)
+    _, phyindex_match = node.find_child_by_regex(pattern=_PHY_INDEX_RE)
+    phyindex = int(phyindex_match.group(_PHY_INDEX_RE_GROUP_PHYINDEX))
+
     bands = []
     for node in node.find_children_by_regex(pattern=_BAND_RE):
       bands.append(_parse_tree_to_band(node))
-    phys.append(Phy(name=phy_name, bands=bands))
+    phys.append(Phy(name=phy_name, phyindex=phyindex, bands=bands))
   return phys
 
 

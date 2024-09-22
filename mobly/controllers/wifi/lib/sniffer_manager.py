@@ -20,10 +20,12 @@ from typing import Any
 
 from mobly import logger as mobly_logger
 from mobly import runtime_test_info
+from mobly import utils
 
 from mobly.controllers.wifi.lib import constants
 from mobly.controllers.wifi.lib import errors
 from mobly.controllers.wifi.lib import iw_utils
+from mobly.controllers.wifi.lib import sniffer_manager_base
 from mobly.controllers.wifi.lib import wifi_configs
 
 # Avoid directly importing cros_device, which causes circular dependencies.
@@ -31,13 +33,19 @@ OpenWrtDevice = Any
 
 _FILE_TAG = 'sniffer'
 _INTERFACE = 'monitor0'
-_REMOTE_FILE_PATH = '/tmp/sniffer.pcap'
+_REMOTE_DIR_NAME = 'sniffer'
 
-# `tcpdump` filter to ignore QoS data frames but keep the EAPOL frames.
-# `ether proto 0x888E` is for keeping the EAPOL frames.
-_FILTER_IGNORE_QOS_DATA_FRAMES = (
-    r'\(ether proto 0x888E\) or not \(type data subtype qos-data\)'
-)
+# Enable rotation with file size 50MB and at most 2 files for packet capturing.
+# The packet capture process alternatively saves to 2 files. Once it reaches the
+# file size limit it will start overwrite the other file.
+# Note that the available RAM on Ubiquiti 6 lite AP is about 120MB, so
+# `_PCAP_FILE_SIZE_MB` * `_KEEP_PCAP_FILE_NUM` must be smaller than 120MB.
+_PCAP_FILE_SIZE_MB = 50
+_KEEP_PCAP_FILE_NUM = 2
+_KEEP_LATEST_PCAP_ARG = f'-W {_KEEP_PCAP_FILE_NUM} -C {_PCAP_FILE_SIZE_MB}'
+
+# `tcpdump` filter to ignore QoS data frames.
+_FILTER_IGNORE_QOS_DATA_FRAMES = r'not \(type data subtype qos-data\)'
 
 
 class SnifferManager:
@@ -56,11 +64,25 @@ class SnifferManager:
 
     self._remote_process = None
     self._capture_file_local_path = None
+    self._local_work_dir = self._device.log_path
+    self._timestamp = mobly_logger.get_log_file_timestamp()
 
   @property
   def is_alive(self) -> bool:
     """True if the service is alive; False otherwise."""
     return self._remote_process is not None
+
+  @property
+  def _remote_work_dir(self) -> Any:
+    """The remote work directory of this object.
+
+    We cannot initialize this in constructor because
+    `self._device.remote_work_dir` can only be used after `device.initialize` is
+    used.
+    """
+    remote_dir = os.path.join(self._device.remote_work_dir, _REMOTE_DIR_NAME)
+    self._device.ssh.make_dirs(remote_dir)
+    return remote_dir
 
   def start_capture(
       self,
@@ -123,74 +145,35 @@ class SnifferManager:
         command=constants.Commands.IP_LINK_UP.format(interface=interface),
         timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
     )
-    cmd = self._gen_iw_set_freq_cmd(interface, freq_config)
+    cmd = sniffer_manager_base.gen_iw_set_freq_cmd(interface, freq_config)
     self._device.ssh.execute_command(
         command=cmd,
         timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
     )
 
-    self._remove_capture_file()
+    self._remove_capture_dir()
 
-    capture_filter = ''
+    self._timestamp = mobly_logger.get_log_file_timestamp()
+    capture_file_remote_path = os.path.join(
+        self._remote_work_dir, f'sniffer,{self._timestamp}.pcap'
+    )
+
+    capture_args = []
+    if capture_config.keep_latest_packets:
+      capture_args.append(_KEEP_LATEST_PCAP_ARG)
     if capture_config.ignore_qos_data_frames:
-      capture_filter = _FILTER_IGNORE_QOS_DATA_FRAMES
+      capture_args.append(_FILTER_IGNORE_QOS_DATA_FRAMES)
     self._remote_process = self._device.ssh.start_remote_process(
         command=constants.Commands.START_TCPDUMP.format(
             interface=interface,
-            file_path=_REMOTE_FILE_PATH,
-            filter=capture_filter,
+            file_path=capture_file_remote_path,
+            args=' '.join(capture_args),
         ),
         get_pty=True,
     )
 
-  def _remove_capture_file(self):
-    if self._device.ssh.is_file(_REMOTE_FILE_PATH):
-      self._device.ssh.rm_file(_REMOTE_FILE_PATH)
-
-  def _gen_iw_set_freq_cmd(
-      self,
-      interface: str,
-      freq_config: wifi_configs.FreqConfig,
-  ) -> str:
-    """Generates the command to set the frequency of the interface.
-
-    There are 2 formats to call an `iw` command to set frequency:
-
-      set freq <freq> [NOHT|HT20|HT40+|HT40-|5MHz|10MHz|80MHz]
-      set freq <control freq> [5|10|20|40|80|80+80|160] [<center1_freq>
-        [<center2_freq>]]
-
-    We use the second pattern for channel widht >= 80MHz, and the first one for
-    the rest as iw will derive the center frequency for us so we don't have to
-    duplicate the logic.
-
-    This function does not validate the given frequencies here and delegate it
-    to `iw`. `iw` fails with invalid argument error if the frequencies are not
-    matched or invalid.
-
-    Args:
-      interface: the wireless interface to set frequency.
-      freq_config: the frequency configuration.
-
-    Returns:
-      The command to set the frequency.
-    """
-    freq = constants.CHANNEL_TO_FREQUENCY[freq_config.channel]
-    args = [str(freq)]
-    match freq_config.ht_mode:
-      case (
-          wifi_configs.HTMode.NOHT
-          | wifi_configs.HTMode.HT20
-          | wifi_configs.HTMode.HT40_PLUS
-          | wifi_configs.HTMode.HT40_MINUS
-      ):
-        args.append(str(freq_config.ht_mode))
-      case wifi_configs.HTMode.HT80:
-        args.append('80')
-        args.append(str(freq_config.center1_freq))
-    return constants.Commands.IW_DEV_SET_FREQ.format(
-        interface=interface, freq_args=' '.join(args)
-    )
+  def _remove_capture_dir(self):
+    self._device.ssh.rm_dir(self._remote_work_dir)
 
   def _print_interface_state(self):
     """Prints interface state."""
@@ -212,13 +195,16 @@ class SnifferManager:
   ):
     """Stops pacaket capture."""
     if not self.is_alive:
+      self._log.warning(
+          'Skip stopping this sniffer manager because it is not running.'
+      )
       return
     self._log.debug('Stopping packet capturing.')
     self._stop_remote_process()
     if current_test_info is not None:
       local_dir = current_test_info.output_path
-      self._pull_capture_file(local_dir)
-    self._remove_capture_file()
+      self._pull_capture_files(local_dir)
+    self._remove_capture_dir()
     self._log.debug('Stopped packet capturing.')
 
   def _stop_remote_process(self):
@@ -230,19 +216,66 @@ class SnifferManager:
     proc.send_signal(signal_id=signal.SIGINT, assert_process_exit=True)
     self._log.debug('Sniffer process output: %s', proc.communicate())
 
-  def _pull_capture_file(self, local_dir: str):
-    """Pulls the capture file from the device to the host."""
-    timestamp = mobly_logger.get_log_file_timestamp()
-    filename = f'{_FILE_TAG},{timestamp}.pcap'
-    local_path = os.path.join(local_dir, filename)
-    if not self._device.ssh.is_file(_REMOTE_FILE_PATH):
+  def _pull_capture_files(self, local_dir: str) -> None:
+    """Pulls the capture files from the device to the host.
+
+    If multiple capture files are found, this will use `mergecap` on host to
+    merge them into one file. If `mergecap` is not installed, this will directly
+    upload all capture files.
+
+    Args:
+      local_dir: the local directory to pull the capture files to.
+    """
+    # Print all capture files info for debugging.
+    self._device.ssh.execute_command(
+        command=f'ls -alh {self._remote_work_dir}',
+        timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
+        ignore_error=True,
+    )
+    pcap_files = list(self._device.ssh.list_dir(self._remote_work_dir))
+    if not pcap_files:
       self._log.warning(
           'Packet capture file does not exist on device. This might be because'
           ' no packets were captured if the capturing time was too short.'
       )
       return
-    self._device.ssh.pull(_REMOTE_FILE_PATH, local_path)
-    self._capture_file_local_path = local_path
+
+    self._device.ssh.pull_remote_directory(self._remote_work_dir, local_dir)
+    pcap_local_paths = [os.path.join(local_dir, name) for name in pcap_files]
+
+    # Skips merge if `mergecap` is not installed.
+    which_mergecap = utils.run_command(['which', 'mergecap'])
+    if which_mergecap[0] != 0:
+      self._device.log.error(
+          'Please install mergecap on your host machine. Otherwise, we will'
+          ' directly upload all capture files without merging them into one'
+          ' capture file.'
+      )
+      self._capture_file_local_path = pcap_local_paths[0]
+      return
+
+    new_file_path = self._merge_capture_files(pcap_local_paths, local_dir)
+    self._capture_file_local_path = new_file_path
+
+  def _merge_capture_files(self, pcap_local_paths: list[str], local_dir: str):
+    """Merges multiple captures files into one capture file."""
+    new_file_name = f'sniffer,merged,{self._timestamp}.pcap'
+    new_file_path = os.path.join(local_dir, new_file_name)
+    self._device.log.debug(
+        'Merging following capture files into one file %s: %s',
+        os.path.basename(new_file_path),
+        ','.join(pcap_local_paths),
+    )
+    result = utils.run_command(
+        ['mergecap', '-w', new_file_path] + pcap_local_paths
+    )
+    if result[0] != 0:
+      raise errors.SnifferManagerError(
+          f'Failed to merge capture files with result: {result}'
+      )
+    for pcap_local_path in pcap_local_paths:
+      os.remove(pcap_local_path)
+    return new_file_path
 
   def get_capture_file(self) -> str | None:
     """Gets the full path of the last capture."""
@@ -250,4 +283,6 @@ class SnifferManager:
 
   def teardown(self):
     """Tears down this manager object."""
+    if not self.is_alive:
+      return
     self.stop_capture()
