@@ -133,6 +133,9 @@ class Commands(enum.StrEnum):
   IW_DEV_STATION_DUMP = 'iw dev {interface} station dump'
   IW_DEV_STATION_GET = 'iw dev {interface} station get {station_mac_address}'
   IW_DEV_SET_FREQ = 'iw dev {interface} set freq {freq_args}'
+  IW_DEV_SET_MAXIMUM_TXPOWER = (
+      'iw dev {interface} set txpower limit {txpower_mbm}'
+  )
 
   # Firewall rules related commands
   FIREWALL_ENABLE_IP_FORWARD = 'echo 1 > /proc/sys/net/ipv4/ip_forward'
@@ -148,7 +151,7 @@ class Commands(enum.StrEnum):
   )
 
   START_TCPDUMP = (
-      'tcpdump -vv -i {interface} -U -e -B 1024 -w {file_path} {filter}'
+      'tcpdump -vv -i {interface} -U -e -B 1024 -w {file_path} {args}'
   )
 
   # Opkg commands.
@@ -173,11 +176,8 @@ class Commands(enum.StrEnum):
 # The network interface to for the AP device to connect with wide area network.
 WAN_INTERFACE = 'br-lan'
 
-# Constant for the name of hostapd.
+# Constant fot the name of hostapd.
 HOSTAPD = 'hostapd'
-
-# Constant for the name of dnsmasq.
-DNSMASQ = 'dnsmasq'
 
 
 # The AP device SSH username.
@@ -200,7 +200,6 @@ OPENWRT_PACKAGE_IPERF3 = 'iperf3'
 #   https://openwrt.org/releases/snapshot
 REQUIRED_PACKAGES_SNAPSHOT = (
     OPENWRT_PACKAGE_SUDO,
-    OPENWRT_PACKAGE_HOSTAPD,
     OPENWRT_PACKAGE_TCPDUMP,
     OPENWRT_PACKAGE_IPERF3,
 )
@@ -210,7 +209,6 @@ REQUIRED_PACKAGES_SNAPSHOT = (
 #   opkg.
 REQUIRED_PACKAGES_OFFICIAL = (
     OPENWRT_PACKAGE_SUDO,
-    OPENWRT_PACKAGE_IPTABLES,
     OPENWRT_PACKAGE_TCPDUMP,
     OPENWRT_PACKAGE_IPERF3,
 )

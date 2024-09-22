@@ -29,6 +29,7 @@ from mobly import utils
 from mobly.controllers.android_device_lib import service_manager
 import paramiko
 
+from google3.pyglib import resources
 from mobly.controllers.wifi.lib import ssh as ssh_lib
 from mobly.controllers.wifi.lib import constants
 from mobly.controllers.wifi.lib import device_info_utils
@@ -146,11 +147,7 @@ class OpenWrtDevice:
     self._hostname = config['hostname']
     self._username = config.get('username', constants.SSH_USERNAME)
     self._password = config.get('password', None)
-    self._provide_long_running_wifi = config.get(
-        'provide_long_running_wifi', False
-    )
-    self._skip_init_reboot = config.get('skip_init_reboot', False)
-    self._ssh_port = _SSH_PORT
+    self._ssh_port = config.get('ssh_port', _SSH_PORT)
     self.serial = f'{self._hostname}:{self._ssh_port}'
     self._device_info = None
 
@@ -173,33 +170,15 @@ class OpenWrtDevice:
     self._remote_work_dir = None
     self._wifi_id_counter = itertools.count(0)
 
-    self._ssh = self._create_ssh_connection()
-    self._wifi_manager_obj = None
+    self._ssh = self._create_ssh_client()
+    self._wifi_manager = wifi_manager.WiFiManager(device=self)
     self.services = service_manager.ServiceManager(device=self)
-    self._sniffer_manager_obj = None
+    self._sniffer_manager = sniffer_manager.SnifferManager(device=self)
 
   def __repr__(self) -> str:
     return f'<{_DEVICE_TAG}|{self.serial}>'
 
-  @property
-  def _wifi_manager(self) -> wifi_manager.WiFiManager:
-    """Lazy initialization of the WiFi manager object."""
-    if self._wifi_manager_obj is None:
-      self._wifi_manager_obj = wifi_manager.WiFiManager(device=self)
-      self._wifi_manager_obj.set_provide_long_running_wifi(
-          self._provide_long_running_wifi
-      )
-      self._wifi_manager_obj.initialize()
-    return self._wifi_manager_obj
-
-  @property
-  def _sniffer_manager(self) -> sniffer_manager.SnifferManager:
-    """Lazy initialization of the sniffer manager object."""
-    if self._sniffer_manager_obj is None:
-      self._sniffer_manager_obj = sniffer_manager.SnifferManager(device=self)
-    return self._sniffer_manager_obj
-
-  def _create_ssh_connection(self) -> ssh_lib.SSHProxy:
+  def _create_ssh_client(self) -> ssh_lib.SSHProxy:
     if self._password is None:
       return ssh_lib.SSHProxy(
           hostname=self._hostname,
@@ -249,12 +228,7 @@ class OpenWrtDevice:
     )
 
     # This is required by the ssh lib to use sftp.
-    try:
-      self._install_package(constants.OPENWRT_PACKAGE_SFTP)
-      self._is_sftp_installed = True
-    except ssh_lib.ExecuteCommandError:
-      self.log.exception('Fail to install %s', constants.OPENWRT_PACKAGE_SFTP)
-      self._is_sftp_installed = False
+    self._install_package(constants.OPENWRT_PACKAGE_SFTP)
 
     packages = constants.REQUIRED_PACKAGES_OFFICIAL
     if wifi_utils.is_using_openwrt_snapshot_image(self.device_info['release']):
@@ -263,11 +237,7 @@ class OpenWrtDevice:
     for pkg in packages:
       self._install_package(pkg)
 
-    if self._provide_long_running_wifi or self._skip_init_reboot:
-      if self._is_sftp_installed:
-        self.ssh.open_sftp()
-    else:
-      self.reboot()
+    self.reboot()
 
     self._register_syslog_service()
 
@@ -308,14 +278,13 @@ class OpenWrtDevice:
 
   @contextlib.contextmanager
   def _handle_reboot(self) -> Iterator[None]:
-    if self._wifi_manager_obj:
-      self._wifi_manager_obj.teardown()
-      self._wifi_manager_obj = None
+    self._wifi_manager.teardown()
     try:
       yield
     finally:
       self._ssh.disconnect()
       self._wait_for_boot_completion()
+      self._wifi_manager.initialize()
 
   def _wait_for_boot_completion(self) -> None:
     """Waits for a ssh connection can be reestablished.
@@ -333,13 +302,17 @@ class OpenWrtDevice:
           f' {_BOOT_STATUS_CHECK_TIMEOUT.total_seconds()} seconds.'
       )
 
+  def ssh_connect(self):
+    """Connects to the device through ssh with sftp enabled."""
+    self._ssh.connect(
+        open_sftp=True,
+        timeout=_SSH_CONNECTION_TIMEOUT.total_seconds(),
+    )
+
   def _is_reboot_ready(self) -> bool:
     """Returns whether the device is ready after reboot."""
     try:
-      self._ssh.connect(
-          open_sftp=getattr(self, '_is_sftp_installed', True),
-          timeout=_SSH_CONNECTION_TIMEOUT.total_seconds(),
-      )
+      self.ssh_connect()
       self._ssh.execute_command(
           constants.Commands.CHECK_DEVICE_REBOOT_READY,
           timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
@@ -355,7 +328,7 @@ class OpenWrtDevice:
     ):
       # ssh connect may fail during certain period of booting
       # process, which is normal. Ignoring these errors.
-      self.log.debug('Ignoring the exception when rebooting.')
+      self.log.exception('Ignoring the exception when rebooting.')
       self._ssh.disconnect()
       return False
 
@@ -397,15 +370,7 @@ class OpenWrtDevice:
       RuntimeError: a component in remote_dir is not a directory.
       SSHNotConnectedError: If sftp is not connected.
     """
-    try:
-      self.ssh.make_dirs(remote_dir)
-    except ssh_lib.SSHNotConnectedError as e:
-      if 'Cannot use SFTP' not in str(e):
-        raise
-      self.ssh.execute_command(
-          command=f'mkdir -p {remote_dir}',
-          timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
-      )
+    self.ssh.make_dirs(remote_dir)
 
   def push_file(
       self,
@@ -421,44 +386,20 @@ class OpenWrtDevice:
       change_permission: whether to change the permission to 777 on remote
         destination.
     """
-    try:
-      self.ssh.push(local_src_filename, remote_dest_filename, change_permission)
-    except ssh_lib.SSHNotConnectedError as e:
-      if 'Cannot use SFTP' not in str(e):
-        raise
-      # Try to use `echo` command to write the file content to the remote file.
-      # This is a workaround for the issue when `sftp` command in not available.
-      self.ssh.execute_command(f'rm -f {remote_dest_filename}')
-      with open(local_src_filename, 'r') as f:
-        content = f.read().replace('"', r'\"').replace('$', '\$')  # pylint: disable=anomalous-backslash-in-string
-        self.ssh.execute_command(
-            # Not using f-string for string concatenation here is bc the content
-            # may contain the reserved keywords '{' and '}', which will be
-            # consumed by the f-string formatting.
-            'echo "'
-            + content
-            + '" >> '
-            + remote_dest_filename
-        )
-      if change_permission:
-        self.ssh.execute_command(f'chmod 777 {remote_dest_filename}')
+    self.ssh.push(local_src_filename, remote_dest_filename, change_permission)
 
   def start_wifi(
       self, config: wifi_configs.WiFiConfig
   ) -> wifi_configs.WifiInfo:
-    if self._sniffer_manager_obj:
+    if self._sniffer_manager.is_alive:
       raise Error(_ERR_USE_AS_BOTH_AP_AND_SNIFFER.format(device=self))
     return self._wifi_manager.start_wifi(config)
 
   def stop_wifi(self, wifi_info: wifi_configs.WifiInfo) -> None:
-    if not self._wifi_manager_obj:
-      return
-    self._wifi_manager_obj.stop_wifi(wifi_info)
+    self._wifi_manager.stop_wifi(wifi_info)
 
   def stop_all_wifi(self) -> None:
-    if not self._wifi_manager_obj:
-      return
-    self._wifi_manager_obj.stop_all_wifi()
+    self._wifi_manager.stop_all_wifi()
 
   def get_all_known_stations(
       self, wifi_info: wifi_configs.WifiInfo
@@ -529,7 +470,7 @@ class OpenWrtDevice:
     """
     if sum([wifi_config is not None, freq_config is not None]) != 1:
       raise Error(_ERR_START_PACKET_CAPTURE_ARG_ERROR.format(device=self))
-    if self._wifi_manager_obj is not None:
+    if self._wifi_manager.is_alive:
       raise Error(_ERR_USE_AS_BOTH_AP_AND_SNIFFER.format(device=self))
 
     if wifi_config is not None:
@@ -542,23 +483,15 @@ class OpenWrtDevice:
       self, current_test_info: runtime_test_info.RuntimeTestInfo | None = None
   ):
     """Stops pacaket capture."""
-    if self._sniffer_manager_obj is None:
-      return
-    self._sniffer_manager_obj.stop_capture(current_test_info=current_test_info)
+    self._sniffer_manager.stop_capture(current_test_info=current_test_info)
 
   def get_capture_file(self) -> str | None:
     """Gets the full path of the last capture."""
-    if self._sniffer_manager_obj is None:
-      return
-    return self._sniffer_manager_obj.get_capture_file()
+    return self._sniffer_manager.get_capture_file()
 
   def teardown(self):
     """Tears the device object down."""
     self.log.info('Tearing down the controller.')
-    if self._sniffer_manager_obj:
-      self._sniffer_manager_obj.teardown()
-      self._sniffer_manager_obj = None
-    if self._wifi_manager_obj:
-      self._wifi_manager_obj.teardown()
-      self._wifi_manager_obj = None
+    self._sniffer_manager.teardown()
+    self._wifi_manager.teardown()
     self._ssh.disconnect()

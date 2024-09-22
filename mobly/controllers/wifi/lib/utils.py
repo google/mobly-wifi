@@ -19,6 +19,7 @@ import string
 import time
 from typing import Any, Callable
 
+from mobly import utils
 from packaging import version
 
 from mobly.controllers.wifi.lib import constants
@@ -79,3 +80,25 @@ def is_using_custom_image(device: 'OpenWrtDevice') -> bool:
       ignore_error=True,
   )
   return output.strip() == constants.CURSTOM_RELEASE_INFO_FILE_PATH
+
+
+def run_command(
+    cmd: str, ignore_error: bool = False
+) -> tuple[int, bytes, bytes]:
+  """Runs a command in a subprocess.
+
+  Args:
+    cmd: The command to run.
+    ignore_error: If False, raise an error if the command execution failed.
+
+  Returns:
+    A 3-tuple of the consisting of the return code, the std output, and the
+      std error.
+
+  Raises:
+    RuntimeError: The command execution failed and `ignore_error=False`.
+  """
+  ret, out, err = utils.run_command(cmd, shell=True)
+  if (not ignore_error) and ret != 0:
+    raise RuntimeError(f'Failed to run command "{cmd}" with error: {err}')
+  return ret, out, err
