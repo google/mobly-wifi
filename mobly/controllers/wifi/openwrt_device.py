@@ -29,7 +29,6 @@ from mobly import utils
 from mobly.controllers.android_device_lib import service_manager
 import paramiko
 
-from google3.pyglib import resources
 from mobly.controllers.wifi.lib import ssh as ssh_lib
 from mobly.controllers.wifi.lib import constants
 from mobly.controllers.wifi.lib import device_info_utils
@@ -148,6 +147,9 @@ class OpenWrtDevice:
     self._username = config.get('username', constants.SSH_USERNAME)
     self._password = config.get('password', None)
     self._ssh_port = config.get('ssh_port', _SSH_PORT)
+    self._skip_init_reboot = wifi_utils.convert_testbed_bool_value(
+        config.get('skip_init_reboot', False)
+    )
     self.serial = f'{self._hostname}:{self._ssh_port}'
     self._device_info = None
 
@@ -237,7 +239,12 @@ class OpenWrtDevice:
     for pkg in packages:
       self._install_package(pkg)
 
-    self.reboot()
+    if self._skip_init_reboot:
+      self.log.info('Skipped reboot when initializing this controller object.')
+      self._ssh.open_sftp()
+      self._wifi_manager.initialize()
+    else:
+      self.reboot()
 
     self._register_syslog_service()
 
@@ -270,14 +277,25 @@ class OpenWrtDevice:
     and the services restored.
     """
     self.log.info('Rebooting AP device...')
-    with self._handle_reboot():
+    with self.handle_reboot():
       # Use execute_command_async here to avoid getting stuck in dangling
       # ssh connection during rebooting.
       self.ssh.execute_command_async(command=constants.Commands.REBOOT)
       time.sleep(_DEVICE_REBOOT_WAIT.total_seconds())
 
   @contextlib.contextmanager
-  def _handle_reboot(self) -> Iterator[None]:
+  def handle_reboot(self) -> Iterator[None]:
+    """Properly manages the service life cycle when the device needs to reboot.
+
+    The device can temporarily lose SSH connection due to user-triggered reboot.
+    Use this function to make sure all Mobly components are properly stopped and
+    restored afterwards.
+
+    For sample usage, see self.reboot().
+
+    Yields:
+      None
+    """
     self._wifi_manager.teardown()
     try:
       yield
