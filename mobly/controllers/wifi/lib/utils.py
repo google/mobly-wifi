@@ -102,3 +102,28 @@ def run_command(
   if (not ignore_error) and ret != 0:
     raise RuntimeError(f'Failed to run command "{cmd}" with error: {err}')
   return ret, out, err
+
+
+def convert_testbed_bool_value(value: bool | str) -> bool:
+  """Converts a raw value from testbed configuration to a bool value.
+
+  We need this method because in some trigger approaches bool values in MH
+  static testbed are transformed to strings in Mobly testbed.
+
+  Args:
+    value: The raw value from testbed configuration.
+
+  Returns:
+    The bool value.
+
+  Raises:
+    ValueError: If got invalid value.
+  """
+  if isinstance(value, bool):
+    return value
+  if isinstance(value, str):
+    if value.lower() == 'true':
+      return True
+    if value.lower() == 'false':
+      return False
+  raise ValueError(f'Invalid bool value from testbed: {value}')

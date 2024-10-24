@@ -6,7 +6,7 @@ maintainers = [{ name = "Minghao Li", email = "minghaoli@google.com" }]
 license = { file = "LICENSE" }
 readme = "README.md"
 requires-python = ">=3.11"
-version = "1.1b1"
+version = "1.1b2"
 dependencies = [
     'mobly>=1.12.2',
     'immutabledict',

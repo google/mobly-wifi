@@ -206,6 +206,9 @@ class HostapdConfig:
   def update_from_wifi_config(self, wifi_config: wifi_configs.WiFiConfig):
     """Updates this object according to the `WiFiConfig` object."""
     self.set_ssid(wifi_config.ssid)
+    if wifi_config.use_random_bssid:
+      bssid = wifi_configs.generate_random_bssid()
+      self.update('bssid', bssid)
 
     # TODO: Better API is returning a dict / hostapd_conf and merge
     # it.

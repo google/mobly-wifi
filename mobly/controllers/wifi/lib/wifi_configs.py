@@ -17,6 +17,7 @@
 from collections.abc import Mapping, Sequence
 import dataclasses
 import enum
+import random
 
 import immutabledict
 from mobly import utils
@@ -148,6 +149,25 @@ def generate_wifi_ssid(band_type: BandType) -> str:
   return f'OpenWRT-{band_type.value}-{random_str}'
 
 
+def generate_random_bssid() -> str:
+  """Generates a random BSSID which is locally administered address and unicast.
+
+  A LAA and unicast MAC address means the second digit must be 2, 6, a or
+  e. I.e. X2:XX:XX:XX:XX:XX is valid, while X1:XX:XX:XX:XX:XX is not.
+
+  Reference:
+  https://en.wikipedia.org/wiki/MAC_address#Ranges_of_group_and_locally_administered_addresses
+
+  Returns:
+    Generated BSSID.
+  """
+  raw_values = [random.randrange(256) for _ in range(6)]
+  raw_values[0] &= ~1
+  raw_values[0] |= 2
+  mac = ':'.join('%02x' % b for b in raw_values)
+  return mac
+
+
 def _transform_channel_width_to_ht_mode(
     width: ChannelWidth,
     channel: int,
@@ -232,6 +252,10 @@ class WiFiConfig:
   # This must be a positive integer.
   # Reference value: by default 23 dBm will be used for channel 36 in US.
   maximum_txpower_dbm: int | None = None
+
+  # If True, the Wi-Fi BSSID will be randomly generated. Otherwise the AP
+  # will use its own MAC address as the Wi-Fi BSSID.
+  use_random_bssid: bool = True
 
   custom_hostapd_configs: Mapping[str, str] = dataclasses.field(
       default_factory=dict
