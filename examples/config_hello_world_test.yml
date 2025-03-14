@@ -2,5 +2,5 @@ TestBeds:
   - Name: SampleTestBed
     Controllers:
       OpenWrtDevice:
-      - hostname: '100.87.74.8'
+      - hostname: '192.168.1.2'
         skip_init_reboot: True

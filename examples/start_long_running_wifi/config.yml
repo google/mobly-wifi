@@ -1,6 +1,0 @@
-TestBeds:
-  - Name: SampleTestBed
-    Controllers:
-      OpenWrtDevice:
-      - hostname: '100.87.74.30'
-        provide_long_running_wifi: True
