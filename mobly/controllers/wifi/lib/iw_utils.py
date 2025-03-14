@@ -18,10 +18,11 @@ See following file for an example of the `iw phy` output:
 //testing/mobly/platforms/wifi/test_data/iw_phy_output.txt
 """
 
+from collections.abc import Sequence
 import dataclasses
 import enum
 import re
-from typing import Any, Self, Sequence
+from typing import Any, Self
 
 from mobly.controllers.wifi.lib import constants
 from mobly.controllers.wifi.lib import errors
@@ -140,7 +141,7 @@ class Station:
 class _TreeNode:
   """The class for representing `iw` output into Tree structure.
 
-  See docstring of `_parse_indented_text` for parse logic.
+  See docstring of `parse_indented_text` for parse logic.
   """
 
   text: str | None
@@ -262,7 +263,7 @@ def _recursively_parse_to_tree(
   return lines
 
 
-def _parse_indented_text(text: str) -> _TreeNode:
+def parse_indented_text(text: str) -> _TreeNode:
   r"""Parses the indented text into a Tree.
 
   Following is the example of indented text to parse:
@@ -355,7 +356,7 @@ def get_all_phys(device: 'OpenWrtDevice') -> Sequence[Phy]:
       timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
   )
   device.log.debug('Parsing command "%s" output to a tree.', cmd)
-  tree_root = _parse_indented_text(output)
+  tree_root = parse_indented_text(output)
 
   device.log.debug('Parsing the tree to structured data types.')
   phys = []
@@ -424,7 +425,7 @@ def _parse_iw_station_output(output: str) -> Sequence[Station]:
   Raises:
     IwOutputParsingError: if failed to parse the output.
   """
-  tree_root = _parse_indented_text(output)
+  tree_root = parse_indented_text(output)
   results = []
   for node in tree_root.children:
     station_title_match = _STATION_TITLE_RE.match(node.text)

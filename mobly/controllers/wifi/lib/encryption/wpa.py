@@ -144,7 +144,15 @@ class Wpa(base_encryption_config.BaseEncryptionConfig):
         )
 
   def update_hostapd_conf(self, hostapd_conf):
-    """See docstring of base class."""
+    """See docstring of base class.
+
+    Args:
+      hostapd_conf: The hostapd config object to update.
+
+    Raises:
+      errors.ConfigError: If given hostapd configuration is not compatible with
+        this encryption configuration.
+    """
     mode_raw = 0
     if self._mode in _MODES_USED_WPA:
       mode_raw |= 1
@@ -161,6 +169,24 @@ class Wpa(base_encryption_config.BaseEncryptionConfig):
       if self._mode in _MODES_USED_WPA3:
         key_mgmt.add(KeyMgmt.SAE.value)
     hostapd_conf.update('wpa_key_mgmt', ' '.join(key_mgmt))
+
+    # PMF can be 0 (disabled) for WPA-PSK.
+    pmf_needed = 0
+    if KeyMgmt.SAE in key_mgmt or KeyMgmt.WPA_PSK_SHA256 in key_mgmt:
+      pmf_needed = 2
+    # WFA recommends PMF to be set to 1 (Optional) for WPA2/WPA3 mixed mode.
+    if KeyMgmt.WPA_PSK in key_mgmt and pmf_needed == 2:
+      pmf_needed = 1
+
+    # Check if the PMF is set to the minimum required value.
+    if hostapd_conf.get('ieee80211w') is None:
+      pmf = 0  # Disabled by default.
+    else:
+      pmf = int(hostapd_conf.get('ieee80211w'))
+    if pmf < pmf_needed:
+      raise errors.ConfigError(
+          f'PMF must be set to at least {pmf_needed}, while it is set to {pmf}'
+      )
 
     hostapd_conf.set_password(self._password)
     if len(self._password) == _HEX_PASSWORD_LEN:
@@ -182,4 +208,14 @@ def gen_config_for_wpa2_ccmp() -> Wpa:
       password=None,
       ciphers2={Cipher.CCMP},
       key_mgmt={KeyMgmt.WPA_PSK},
+  )
+
+
+def gen_config_for_wpa3_ccmp() -> Wpa:
+  """Generates a WPA3-Personal configuration object with default settings."""
+  return Wpa(
+      mode=Mode.PURE_WPA3,
+      password=None,
+      ciphers2={Cipher.CCMP},
+      key_mgmt={KeyMgmt.SAE},
   )

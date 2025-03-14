@@ -14,10 +14,11 @@
 
 """Utilities for the AP controller module."""
 
+from collections.abc import Callable
 import datetime
 import string
 import time
-from typing import Any, Callable
+from typing import Any
 
 from mobly import utils
 from packaging import version

@@ -229,12 +229,17 @@ class OpenWrtDevice:
         open_sftp=False, timeout=_SSH_CONNECTION_TIMEOUT.total_seconds()
     )
 
-    # This is required by the ssh lib to use sftp.
-    self._install_package(constants.OPENWRT_PACKAGE_SFTP)
-
-    packages = constants.REQUIRED_PACKAGES_OFFICIAL
-    if wifi_utils.is_using_openwrt_snapshot_image(self.device_info['release']):
-      packages = constants.REQUIRED_PACKAGES_SNAPSHOT
+    packages = constants.REQUIRED_PACKAGES_RELEASED_IMAGE
+    if self.device_info.get(
+        'device_name', None
+    ) == constants.ApModel.BPIR3 and wifi_utils.is_using_custom_image(
+        device=self
+    ):
+      packages = constants.REQUIRED_PACKAGES_BPIR3_AND_CROS_BUILT_IMAGE
+    elif wifi_utils.is_using_openwrt_snapshot_image(
+        self.device_info['release']
+    ):
+      packages = constants.REQUIRED_PACKAGES_SNAPSHOT_IMAGE
 
     for pkg in packages:
       self._install_package(pkg)

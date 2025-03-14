@@ -106,13 +106,13 @@ class WiFiManager:
         timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
     )
 
-    # TODO: Temp workaround for new firewall rule.
-    if utils.is_new_firewall_rule_version(self._device.device_info['release']):
-      return
-
     if utils.is_using_openwrt_snapshot_image(
         self._device.device_info['release']
     ):
+      return
+
+    # TODO: Temp workaround for new firewall rule.
+    if utils.is_new_firewall_rule_version(self._device.device_info['release']):
       return
 
     # Enable NAT, i.e., outbound traffic through the WAN interface will have its

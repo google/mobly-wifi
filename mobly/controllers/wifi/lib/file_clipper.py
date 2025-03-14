@@ -58,15 +58,21 @@ class FileClipper:
     file_clipper.close()
   """
 
-  def __init__(self, source_file_path: pathlib.Path) -> None:
+  def __init__(
+      self,
+      source_file_path: pathlib.Path,
+      ignore_existing_content: bool = False,
+  ) -> None:
     """Initializes an instance and opens the file object to read the given file.
 
     Args:
       source_file_path: The host path of the source file to clip.
+      ignore_existing_content: Whether to ignore the existing content in the
+        source file before initializing the clipper. Defaults to False.
     """
     self._source_file_path = source_file_path
     self._file_obj_to_read = None
-
+    self._ignore_existing_content = ignore_existing_content
     # We intentionally hide the `open` method from users and open the file
     # object in the constructor, because no use case shall open the file object
     # multiple times.
@@ -84,6 +90,8 @@ class FileClipper:
     self._source_file_path.touch()
     self._file_obj_to_read = io.open(
         self._source_file_path, 'r', encoding='utf-8', errors='replace')
+    if self._ignore_existing_content:
+      self._file_obj_to_read.seek(0, io.SEEK_END)
 
   def close(self) -> None:
     """Closes all resources acquired in this instance."""

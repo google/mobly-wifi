@@ -15,6 +15,7 @@
 """A wrapper of paramiko.SSHClient to interact with test machine remotely."""
 
 from __future__ import annotations
+from collections.abc import Iterable, Mapping
 import contextlib
 import dataclasses
 import errno
@@ -26,7 +27,7 @@ import socket
 import stat
 import threading
 import time
-from typing import Iterable, Mapping, Optional, Tuple, Dict, cast
+from typing import Optional, cast
 
 from mobly import logger as mobly_logger
 import paramiko
@@ -153,7 +154,7 @@ class SSHProxy:
     self._ssh_port = ssh_port
     self._ssh_keyfile = keyfile
     self._allow_agent = allow_agent
-    self._port_forward_servers: Dict[int, forward.ForwardServer] = {}
+    self._port_forward_servers: dict[int, forward.ForwardServer] = {}
     self._proxy_command = (
         paramiko.ProxyCommand(proxy_command)
         if proxy_command is not None
@@ -571,7 +572,7 @@ class SSHProxy:
     if dir_path != '/':
       dir_path = dir_path.rstrip('/')
     dir_stat_info = self.stat(dir_path)
-    return dir_stat_info and stat.S_ISDIR(dir_stat_info.st_mode)
+    return dir_stat_info and stat.S_ISDIR(dir_stat_info.st_mode)  # pytype: disable=bad-return-type
 
   def is_file(self, file_path: str) -> bool:
     """Checks whether the file_path is a file.
@@ -584,7 +585,7 @@ class SSHProxy:
     """
     file_path = file_path.rstrip('/')
     file_stat_info = self.stat(file_path)
-    return file_stat_info and stat.S_ISREG(file_stat_info.st_mode)
+    return file_stat_info and stat.S_ISREG(file_stat_info.st_mode)  # pytype: disable=bad-return-type
 
   def exists(self, remote_path: str) -> bool:
     """Checks whether the path exists on the remote machine.
@@ -728,7 +729,7 @@ class SSHProxy:
       command: str,
       timeout: Optional[int] = None,
       get_pty: bool = False
-  ) -> Tuple[channel.ChannelStdinFile, channel.ChannelFile,
+  ) -> tuple[channel.ChannelStdinFile, channel.ChannelFile,
              channel.ChannelStderrFile]:
     """Executes the command in the remote machine.
 
@@ -909,7 +910,7 @@ class RemotePopen:
         self._stdout, output_file_path, logger)
     self._output_streamer.start()
 
-  def communicate(self) -> Tuple[str, str]:
+  def communicate(self) -> tuple[str, str]:
     """Returns the stdout and stderr when the command finishes.
 
     If this object is streaming the remote process output, this method will
