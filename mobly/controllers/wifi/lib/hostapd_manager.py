@@ -203,6 +203,19 @@ class HostapdConfig:
   def update(self, key: str, value: str):
     self._raw[key] = value
 
+  def get(self, key: str) -> str | None:
+    """Gets the value of the given key.
+
+    Args:
+      key: The key to get the value.
+
+    Returns:
+      The value of the given key, or None if the key is not found.
+    """
+    if key not in self._raw:
+      return None
+    return self._raw[key]
+
   def update_from_wifi_config(self, wifi_config: wifi_configs.WiFiConfig):
     """Updates this object according to the `WiFiConfig` object."""
     self.set_ssid(wifi_config.ssid)
@@ -212,7 +225,7 @@ class HostapdConfig:
 
     # TODO: Better API is returning a dict / hostapd_conf and merge
     # it.
-    wifi_config.encryption_config.update_hostapd_conf(hostapd_conf=self)
+    self._update_encryption_configs(wifi_config)
     self.set_channel(wifi_config.channel)
     self._update_dfs_channel_config(wifi_config)
 
@@ -356,6 +369,15 @@ class HostapdConfig:
           'he_oper_centr_freq_seg0_idx',
           str(_get_center_channel_with_width_80mhz(wifi_config.channel)),
       )
+
+  def _update_encryption_configs(
+      self, wifi_config: wifi_configs.WiFiConfig
+  ):
+    """Updates the encryption configuration."""
+    # Feed this to the encryption config checking.
+    if wifi_config.pmf is not None:
+      self.update('ieee80211w', str(wifi_config.pmf.value))
+    wifi_config.encryption_config.update_hostapd_conf(hostapd_conf=self)
 
 
 class HostapdManager:

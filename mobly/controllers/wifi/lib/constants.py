@@ -103,6 +103,18 @@ STANDARDS_SUPPORT_HE_CAPAB = (Ieee80211Standards.AX,)
 
 
 @enum.unique
+class ApModel(enum.StrEnum):
+  """The enum for AP models.
+
+  The values should equal to the `deviceName` in the file
+  `/etc/cros/cros_openwrt_image_build_info.json`.
+  """
+
+  U6LITE = 'Ubiquiti UniFi 6 Lite'
+  BPIR3 = 'Bananapi BPi-R3'
+
+
+@enum.unique
 class IptablesAction(enum.StrEnum):
 
   INSERT = '-I'
@@ -125,6 +137,7 @@ class Commands(enum.StrEnum):
   IW_PHY_INFO = 'iw phy {phy} info'
   IW_REG_SET = 'iw reg set {country_code}'
   IW_REG_GET = 'iw reg get'
+  IW_PHY_REG_GET = 'iw phy {phy} reg get'
   IW_DEV = 'iw dev'
   IW_DEV_DEL = 'iw dev {interface} del'
   IW_DEV_ADD = 'iw phy {phy} interface add {interface} type managed'
@@ -136,6 +149,7 @@ class Commands(enum.StrEnum):
   IW_DEV_SET_MAXIMUM_TXPOWER = (
       'iw dev {interface} set txpower limit {txpower_mbm}'
   )
+  IW_DEV_SCAN = 'iw dev {interface} scan {frequencies} {ssids}'
 
   # Firewall rules related commands
   FIREWALL_ENABLE_IP_FORWARD = 'echo 1 > /proc/sys/net/ipv4/ip_forward'
@@ -198,20 +212,25 @@ OPENWRT_PACKAGE_IPERF3 = 'iperf3'
 # * Do NOT include `iptables` because snapshot images have limitation on
 #   installing kernel version dependent modules. Reference:
 #   https://openwrt.org/releases/snapshot
-REQUIRED_PACKAGES_SNAPSHOT = (
+REQUIRED_PACKAGES_SNAPSHOT_IMAGE = (
+    OPENWRT_PACKAGE_SFTP,
     OPENWRT_PACKAGE_SUDO,
     OPENWRT_PACKAGE_TCPDUMP,
-    OPENWRT_PACKAGE_IPERF3,
 )
 
 # Required packages when using an official OpenWrt image.
 # * Do NOT include `hostapd` because it might be installed but not through
 #   opkg.
-REQUIRED_PACKAGES_OFFICIAL = (
+REQUIRED_PACKAGES_RELEASED_IMAGE = (
+    OPENWRT_PACKAGE_SFTP,
     OPENWRT_PACKAGE_SUDO,
     OPENWRT_PACKAGE_TCPDUMP,
-    OPENWRT_PACKAGE_IPERF3,
 )
+
+# Required packages when using AP model BPi R3 and a CrOS customized image.
+# The image used in BPi R3 is yet fully upstreamed thus installing package from
+# online repos doesn't work. So we assume the packages are already installed.
+REQUIRED_PACKAGES_BPIR3_AND_CROS_BUILT_IMAGE = tuple()
 
 DEVICE_INFO_PATTERN = re.compile(
     r"DISTRIB_ID='(?P<image_type>.*)'\n"
