@@ -2,9 +2,7 @@ TestBeds:
   - Name: SampleTestBed
     Controllers:
       OpenWrtDevice:
-      - hostname: '192.168.3.1'
-        skip_init_reboot: True
-      - hostname: '192.168.2.1'
+      - hostname: '192.168.1.2'
         skip_init_reboot: True
       AndroidDevice: '*'
       
