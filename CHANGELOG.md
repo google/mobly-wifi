@@ -1,3 +1,8 @@
+# Mobly Wi-Fi Release 1.2.0: BPi R3 AP model support
+
+## New
+* Support new AP hardware model Banana Pi R3.
+
 # Mobly Wi-Fi Release 1.1: Packet capture support
 
 ## New
