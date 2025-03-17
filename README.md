@@ -18,12 +18,12 @@ pip install mobly-wifi
 Mobly WiFi controller is an add-on module to control OpenWrt AP devices in [Mobly](https://github.com/google/mobly).
 To learn more about Mobly, visit [Getting started with Mobly](https://github.com/google/mobly/blob/master/docs/tutorial.md).
 
-### Make sure the AP device is SSH-able
+### Ensure the AP device is reachable via SSH
 
-Mobly tests are all running on one host computer.
+Mobly tests run on a single host computer.
 
-To use AP devices in Mobly tests, you need to connect AP to your local network
-and make sure that it is SSH-able from the host computer.
+To use an AP device in Mobly tests, connect it to your local network and confirm
+SSH access from the host machine.
 
 ### Write Mobly Device Configs
 
@@ -39,9 +39,11 @@ TestBeds:
     -  hostname: 'IP_ADDRESS'
 ```
 
-NOTE: Replace `IP_ADDRESS` with your device information.
+NOTE: Replace `IP_ADDRESS` with the IP address of the AP device.
 
 ### Write a Hello World Mobly Test
+
+This example test starts a 5G Wi-Fi network on the given AP device.
 
 **hello_world_test.py**
 
@@ -59,9 +61,11 @@ from mobly.controllers.wifi.lib import wifi_configs
 class HelloWorldTest(base_test.BaseTestClass):
  
   def setup_class(self):
+    # Register controller for the AP device
     self.openwrt = self.register_controller(openwrt_device)[0]
  
   def test_start_5g_wifi(self):
+    # Start Wi-Fi network with channel=36
     config = wifi_configs.WiFiConfig(channel=36)
     wifi_info = self.openwrt.start_wifi(config=config)
     self.openwrt.log.info(
@@ -96,11 +100,12 @@ TestBeds:
   Controllers:
     OpenWrtDevice:
     - hostname: 'IP_ADDRESS'
+    # Use all Android devices detectable by adb
     AndroidDevice: '*'
 ```
 
-Following testbed uses one AP device and Android devices with serial number `xyz`
-and `abc`.
+Following testbed uses one AP device and Android devices with serial number
+`abc` and `xyz`.
 
 ```yaml
 TestBeds:
