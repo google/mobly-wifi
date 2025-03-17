@@ -120,4 +120,4 @@ TestBeds:
 
 ### More Examples
 
-See [examples](./examples) for more examples.
+See [examples](./examples) folder for more examples.
