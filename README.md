@@ -18,15 +18,16 @@ pip install mobly-wifi
 Mobly WiFi controller is an add-on module to control OpenWrt AP devices in [Mobly](https://github.com/google/mobly).
 To learn more about Mobly, visit [Getting started with Mobly](https://github.com/google/mobly/blob/master/docs/tutorial.md).
 
-### One-Time Setup on Host
+### Make sure the AP device is SSH-able
 
-Get the SSH identity key to OpenWrt devices
-[here](https://chromium.googlesource.com/chromiumos/chromite/+/master/ssh_keys/testing_rsa?pli=1),
-put it at `~/.ssh/testing_rsa`.
+Mobly tests are all running on one host computer.
+
+To use AP devices in Mobly tests, you need to connect AP to your local network
+and make sure that it is SSH-able from the host computer.
 
 ### Write Mobly Device Configs
 
-To use an OpenWrt AP device in Mobly tests, first you need to write a config to specify the information of the device under test. For example:
+Write a testbed config to specify the information of the device under test. For example:
 
 **sample_config.yaml**
 
@@ -80,3 +81,38 @@ if __name__ == '__main__':
 ```bash
 python hello_world_test.py -c sample_config.yaml
 ```
+
+### Configure Android devices in Mobly tests
+
+To use Android devices together with AP devices, you need to configure them in
+testbed config.
+
+Following testbed uses one AP device and all Android devices connected with your
+host computer:
+
+```yaml
+TestBeds:
+- Name: SampleOpenWrtTestbed
+  Controllers:
+    OpenWrtDevice:
+    - hostname: 'IP_ADDRESS'
+    AndroidDevice: '*'
+```
+
+Following testbed uses one AP device and Android devices with serial number `xyz`
+and `abc`.
+
+```yaml
+TestBeds:
+- Name: SampleOpenWrtTestbed
+  Controllers:
+    OpenWrtDevice:
+    - hostname: 'IP_ADDRESS'
+    AndroidDevice: '*'
+    - serial: abc
+    - serial: xyz
+```
+
+### More Examples
+
+See [examples](./examples) for more examples.
