@@ -29,6 +29,7 @@ https://github.com/google/mobly-bundled-snippets
 import dataclasses
 import datetime
 import enum
+import logging
 import re
 import time
 
@@ -67,6 +68,7 @@ class SimpleConnectTest(base_test.BaseTestClass):
       self.ad.load_snippet('mbs', 'com.google.android.mobly.snippet.bundled')
     except Exception:
       logging.error(_MESSAGE_MOBLY_SNIPPET_BUNDLE_IS_NOT_INSTALLED)
+      raise
 
     # Register OpenWrt devices.
     self.openwrt = self.register_controller(openwrt_device)[0]
