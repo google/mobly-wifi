@@ -18,15 +18,16 @@ pip install mobly-wifi
 Mobly WiFi controller is an add-on module to control OpenWrt AP devices in [Mobly](https://github.com/google/mobly).
 To learn more about Mobly, visit [Getting started with Mobly](https://github.com/google/mobly/blob/master/docs/tutorial.md).
 
-### One-Time Setup on Host
+### Ensure the AP device is reachable via SSH
 
-Get the SSH identity key to OpenWrt devices
-[here](https://chromium.googlesource.com/chromiumos/chromite/+/master/ssh_keys/testing_rsa?pli=1),
-put it at `~/.ssh/testing_rsa`.
+Mobly tests run on a single host computer.
+
+To use an AP device in Mobly tests, connect it to your local network and confirm
+SSH access from the host machine.
 
 ### Write Mobly Device Configs
 
-To use an OpenWrt AP device in Mobly tests, first you need to write a config to specify the information of the device under test. For example:
+Write a testbed config to specify the information of the device under test. For example:
 
 **sample_config.yaml**
 
@@ -38,9 +39,11 @@ TestBeds:
     -  hostname: 'IP_ADDRESS'
 ```
 
-NOTE: Replace `IP_ADDRESS` with your device information.
+NOTE: Replace `IP_ADDRESS` with the IP address of the AP device.
 
 ### Write a Hello World Mobly Test
+
+This example test starts a 5G Wi-Fi network on the given AP device.
 
 **hello_world_test.py**
 
@@ -58,9 +61,11 @@ from mobly.controllers.wifi.lib import wifi_configs
 class HelloWorldTest(base_test.BaseTestClass):
  
   def setup_class(self):
+    # Register controller for the AP device
     self.openwrt = self.register_controller(openwrt_device)[0]
  
   def test_start_5g_wifi(self):
+    # Start Wi-Fi network with channel=36
     config = wifi_configs.WiFiConfig(channel=36)
     wifi_info = self.openwrt.start_wifi(config=config)
     self.openwrt.log.info(
@@ -80,3 +85,39 @@ if __name__ == '__main__':
 ```bash
 python hello_world_test.py -c sample_config.yaml
 ```
+
+### Configure Android devices in Mobly tests
+
+To use Android devices together with AP devices, you need to configure them in
+testbed config.
+
+Following testbed uses one AP device and all Android devices connected with your
+host computer:
+
+```yaml
+TestBeds:
+- Name: SampleOpenWrtTestbed
+  Controllers:
+    OpenWrtDevice:
+    - hostname: 'IP_ADDRESS'
+    # Use all Android devices detectable by adb
+    AndroidDevice: '*'
+```
+
+Following testbed uses one AP device and Android devices with serial number
+`abc` and `xyz`.
+
+```yaml
+TestBeds:
+- Name: SampleOpenWrtTestbed
+  Controllers:
+    OpenWrtDevice:
+    - hostname: 'IP_ADDRESS'
+    AndroidDevice: '*'
+    - serial: abc
+    - serial: xyz
+```
+
+### More Examples
+
+See [examples](./examples) folder for more examples.
