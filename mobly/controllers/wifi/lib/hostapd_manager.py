@@ -21,6 +21,7 @@ The responsibility of this module mainly include:
 
 from collections.abc import Sequence
 import contextlib
+import dataclasses
 import datetime
 import logging
 import os
@@ -36,6 +37,8 @@ from mobly.controllers.wifi.lib import errors
 from mobly.controllers.wifi.lib import iw_utils
 from mobly.controllers.wifi.lib import utils
 from mobly.controllers.wifi.lib import wifi_configs
+from mobly.controllers.wifi.utils import ip_utils
+
 
 OpenWrtDevice = Any
 
@@ -163,6 +166,31 @@ def _get_center_channel_with_width_80mhz(channel_20mhz: int) -> int:
       )
 
 
+@dataclasses.dataclass(frozen=True)
+class HostapdBssTmReqParams:
+  """Parameters for a BSS Transition Management Request.
+
+  Attributes:
+    client_mac_address: The MAC address of the client station.
+    neighbors: Optional. A sequence of BSSIDs for preferred neighbor APs.
+    disassoc_imminent: If True, the AP will indicate imminent disassociation.
+    disassoc_timer_100ms: Time in 100ms units before the AP disassociates the
+      STA. Only valid if disassoc_imminent is True.
+    reassoc_delay_sec: Delay in seconds before STA is permitted to reassociate.
+      Assumes MBO is enabled on the AP if this is used, since this is an MBO
+      attribute. Only valid if disassoc_imminent is True.
+    bss_term_minutes: Duration in minutes for which the current BSS will be
+      unavailable. TSF is assumed to be 0 (immediate).
+  """
+
+  client_mac_address: str
+  neighbors: Sequence[str] = dataclasses.field(default_factory=list)
+  disassoc_imminent: bool = False
+  disassoc_timer_100ms: int | None = None
+  reassoc_delay_sec: int | None = None
+  bss_term_minutes: int | None = None
+
+
 class HostapdConfig:
   """The hostapd configurations.
 
@@ -175,6 +203,7 @@ class HostapdConfig:
     ssid: The WiFi SSID.
     password: The WiFi password.
     interface: The name of the network interface that the WiFi network is using.
+    bridge: The name of the bridge interface.
     config_content: The content of the hostapd configuration file.
   """
 
@@ -182,11 +211,17 @@ class HostapdConfig:
   ssid: str
   password: str | None
   interface: str
+  bridge: str | None = None
 
   _raw: dict[str, str]
 
   def __init__(
-      self, interface: str, dfs_channels: set[int], is_custom_openwrt: bool
+      self,
+      interface: str,
+      dfs_channels: set[int],
+      is_custom_openwrt: bool,
+      ctrl_socket_path: str,
+      bridge: str | None = None,
   ):
     self._dfs_channels = dfs_channels
     self._raw = {}
@@ -199,6 +234,12 @@ class HostapdConfig:
         str(_IS_CUSTOM_OPENWRT_TO_DEFAULT_FRAGM_THRESHOLD[is_custom_openwrt]),
     )
     self.set_interface(interface)
+    # Set control interface for hostapd_cli
+    self.update('ctrl_interface', ctrl_socket_path)
+    # Common group for hostapd_cli, 0 means root/admin.
+    self.update('ctrl_interface_group', '0')
+    if bridge is not None:
+      self.set_bridge(bridge)
 
   def update(self, key: str, value: str):
     self._raw[key] = value
@@ -240,6 +281,9 @@ class HostapdConfig:
     if wifi_config.pmf is not None:
       self.update('ieee80211w', str(wifi_config.pmf.value))
 
+    if wifi_config.hidden:
+      self.update('ignore_broadcast_ssid', '1')
+
     for key, value in wifi_config.custom_hostapd_configs.items():
       self.update(key, value)
 
@@ -257,6 +301,10 @@ class HostapdConfig:
   def set_channel(self, value: int):
     self.channel = value
     self.update('channel', str(value))
+
+  def set_bridge(self, value: str):
+    self.bridge = value
+    self.update('bridge', value)
 
   def is_using_a_dfs_channel(self) -> bool:
     """Returns true if the channel is a DFS channel."""
@@ -390,6 +438,7 @@ class HostapdManager:
       phy: iw_utils.Phy,
       interface: str,
       wifi_config: wifi_configs.WiFiConfig,
+      bridge: str | None = None,
       base_logger: (
           logging.Logger | mobly_logger.PrefixLoggerAdapter | None
       ) = None,
@@ -403,6 +452,7 @@ class HostapdManager:
       interface: The name of the network interface that the WiFi network is
         using.
       wifi_config: The WiFi configurations.
+      bridge: The name of the bridge interface.
       base_logger: The base logger. Based on that logger, this class will prefix
         each log entry with string "[HostapdManager]".
     """
@@ -411,6 +461,8 @@ class HostapdManager:
     self._wifi_config = wifi_config
     self._phy = phy
     self._interface = interface
+    self._bridge = bridge
+    self._bssid = None
 
     self._hostapd_config = None
     self._wifi_info = None
@@ -451,19 +503,26 @@ class HostapdManager:
         interface=self._interface,
         dfs_channels=dfs_channels,
         is_custom_openwrt=utils.is_using_custom_image(self._device),
+        ctrl_socket_path=self._remote_work_dir,
+        bridge=self._bridge,
     )
     self._hostapd_config.update_from_wifi_config(self._wifi_config)
 
+    self._bssid = None
+    conf_remote_path = self._generate_remote_config_file()
+    self._start_hostpad_process(conf_remote_path)
+
+    self._bssid = typing.cast(str, self._bssid)
     self._wifi_info = wifi_configs.WifiInfo(
         id=self._wifi_id,
         ssid=self._hostapd_config.ssid,
         password=self._hostapd_config.password,
         interface=self._interface,
         phy_name=self._phy.name,
+        bssid=self._bssid,
+        bridge=self._bridge,
     )
 
-    conf_remote_path = self._generate_remote_config_file()
-    self._start_hostpad_process(conf_remote_path)
     return self._wifi_info
 
   def _generate_remote_config_file(self) -> str:
@@ -514,7 +573,11 @@ class HostapdManager:
     self._log.debug('Started remote hostapd process.')
 
   def _is_wifi_ready(self):
-    """Returns whether the WiFi is ready."""
+    """Returns whether the WiFi is ready.
+
+    If WiFi is ready, `self._bssid` will be set to the BSSID of the WiFi
+    network.
+    """
     if self._remote_process is None:
       raise errors.HostapdStartError(
           'Hostapd process is not set. Please check whether hostapd object'
@@ -527,14 +590,24 @@ class HostapdManager:
           f' file {self._get_conf_filename()}'
       )
 
+    cmd = constants.Commands.IP_LINK_SHOW.format(interface=self._interface)
     stdout = self._device.ssh.execute_command(
-        command=constants.Commands.IP_LINK_SHOW.format(
-            interface=self._interface
-        ),
+        command=cmd,
         timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
         ignore_error=True,
     )
-    return 'state UP' in stdout
+    if 'state UP' not in stdout:
+      return False
+
+    intfs_all = ip_utils.parse_all_ip_addr(stdout)
+    if len(intfs_all) != 1:
+      raise errors.HostapdStartError(
+          f'Got unexpected number of interfaces in "{cmd}" output: {intfs_all}.'
+      )
+    intf = intfs_all[0]
+    self._bssid = intf.mac_address
+    self._log.debug('WiFi AP is ready. Interface info: %s', intf)
+    return True
 
   def __del__(self):
     self.stop()
@@ -548,11 +621,60 @@ class HostapdManager:
         'Stopping hostapd process %d.',
         self._remote_process.pid,
     )
+    self._bssid = None
     proc = self._remote_process
     self._remote_process = None
     proc.terminate(
         timeout=_WIFI_STOP_WAIT_TIME.total_seconds(), assert_process_exit=True
     )
+
+  def _get_ctrl_socket_path(self) -> str:
+    """Gets the path of the control socket.
+
+    Raises:
+      errors.ConfigError: If the control socket path is not set.
+
+    Returns:
+      The path of the control socket.
+    """
+    self._hostapd_config = typing.cast(HostapdConfig, self._hostapd_config)
+    ctrl_interface = self._hostapd_config.get('ctrl_interface')
+    if ctrl_interface is None:
+      raise errors.ConfigError('ctrl_interface is not set.')
+    return ctrl_interface
+
+  def _run_hostapd_cli_command(self, command_args: Sequence[str]) -> str:
+    """Runs a hostapd_cli command for the managed interface.
+
+    Args:
+      command_args: A sequence of arguments to pass to hostapd_cli (e.g.,
+        ["list_sta"], ["bss_tm_req", "00:11:22:aa:bb:cc",
+        "disassoc_imminent=1"]).
+
+    Returns:
+      The stdout from the command.
+
+    Raises:
+      errors.BaseError: If the hostapd process is not running.
+      ssh_lib.ExecuteCommandError: If the command execution fails.
+    """
+    if self._remote_process is None or self._remote_process.poll() is not None:
+      raise errors.BaseError(
+          'Hostapd process is not running. Cannot execute hostapd_cli command.'
+      )
+
+    ctrl_path = self._get_ctrl_socket_path()
+    full_command_str = constants.Commands.HOSTAPD_CLI.format(
+        ctrl_path=ctrl_path,
+        interface=self._interface,
+        command_args=' '.join(command_args),
+    )
+    self._log.debug('Executing hostapd_cli command: %s', full_command_str)
+    output = self._device.ssh.execute_command(
+        command=full_command_str,
+        timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
+    )
+    return output.strip()
 
   def _get_remote_path(self, filename: str) -> str:
     return os.path.join(self._remote_work_dir, filename)
@@ -565,3 +687,111 @@ class HostapdManager:
 
   def _get_log_filename(self) -> str:
     return f'{self._identifier},hostapd.log'
+
+  def send_bss_tm_request(self, params: HostapdBssTmReqParams) -> str:
+    """Sends a BSS Transition Management Request to a client.
+
+    Args:
+      params: The parameters for the BSS TM Request.
+
+    Returns:
+      The stdout from the hostapd_cli command.
+    """
+    command_args = ['BSS_TM_REQ', params.client_mac_address]
+
+    for neighbor_bssid in params.neighbors:
+      command_args.append(f'neighbor={neighbor_bssid},0,0,0,0')
+    if params.neighbors:
+      command_args.append('pref=1')
+
+    if params.disassoc_imminent:
+      command_args.append('disassoc_imminent=1')
+      if params.disassoc_timer_100ms is not None:
+        command_args.append(f'disassoc_timer={params.disassoc_timer_100ms}')
+      if params.reassoc_delay_sec is not None:
+        # MBO attribute for reassoc delay: mbo=3:<reassoc_delay_sec>:0
+        # Assumes MBO is enabled on the AP if this is used.
+        command_args.append(f'mbo=3:{params.reassoc_delay_sec}:0')
+    elif (
+        params.disassoc_timer_100ms is not None
+        or params.reassoc_delay_sec is not None
+    ):
+      self._log.warning(
+          'disassoc_timer or reassoc_delay specified without'
+          ' disassoc_imminent=True. These parameters might be ignored by'
+          ' hostapd.'
+      )
+
+    if params.bss_term_minutes is not None and params.bss_term_minutes > 0:
+      # hostapd_cli bss_term format is bss_term=<tsf_hex>,<duration_minutes>
+      # Using TSF 0, which means the BSS will be terminated immediately.
+      command_args.append(f'bss_term=0,{params.bss_term_minutes}')
+
+    return self._run_hostapd_cli_command(command_args)
+
+  def set_hostapd_property(self, property_name: str, value: str) -> None:
+    """Sets the property of the hostapd daemon.
+
+    This function executes the `hostapd_cli set` command to modify a specific
+    property of the running hostapd instance.
+
+    Args:
+      property_name: The name of the property to set. (e.g.,
+        'mbo_assoc_disallow')
+      value: The value to assign to the property.
+
+    Raises:
+      errors.HostapdSetPropertyError: If setting the property fails.
+    """
+    command_args = ['set', property_name, value]
+    try:
+      output = self._run_hostapd_cli_command(command_args)
+    except (ssh_lib.ExecuteCommandError, errors.BaseError) as e:
+      raise errors.HostapdSetPropertyError(
+          f'Failed to set hostapd property {property_name} to {value}.'
+      ) from e
+    if output.strip() != 'OK':
+      raise errors.HostapdSetPropertyError(
+          f'Failed to set hostapd property {property_name} to {value}.'
+          f' Output: {output}'
+      )
+
+  def channel_switch(
+      self,
+      target_channel: int,
+      beacon_count: int,
+      optional_args: Sequence[str] | None = None,
+  ) -> None:
+    """Performs a channel switch from the current channel to the target channel.
+
+    Args:
+      target_channel: The target channel to switch to.
+      beacon_count: The number of beacons to send before switching channels.
+      optional_args: Optional arguments to pass to the hostapd_cli command.
+
+    Raises:
+      errors.HostapdChannelSwitchError: If the channel switch fails.
+    """
+    if target_channel not in constants.CHANNEL_TO_FREQUENCY:
+      raise errors.HostapdChannelSwitchError(
+          f'Target channel {target_channel} is not a valid channel.'
+      )
+    command_args = [
+        'chan_switch',
+        str(beacon_count),
+        str(constants.CHANNEL_TO_FREQUENCY[target_channel]),
+    ]
+    if optional_args:
+      command_args.extend(optional_args)
+
+    try:
+      output = self._run_hostapd_cli_command(command_args)
+    except (ssh_lib.ExecuteCommandError, errors.BaseError) as e:
+      raise errors.HostapdChannelSwitchError(
+          f'Failed to switch channel to {target_channel}.'
+      ) from e
+    if output.strip() != 'OK':
+      raise errors.HostapdChannelSwitchError(
+          f'Failed to switch channel to {target_channel}.'
+          f' Output: {output}'
+      )

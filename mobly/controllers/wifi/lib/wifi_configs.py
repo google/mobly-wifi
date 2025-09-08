@@ -14,7 +14,7 @@
 
 """Configuration classes for the AP controller module."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Sequence, Set
 import dataclasses
 import enum
 import random
@@ -103,6 +103,7 @@ class HTMode(enum.StrEnum):
 class HostapdHTCapab(enum.StrEnum):
   """HT capabilities that can be set to `ht_capab` field of hostapd config."""
 
+  HT20 = '[HT20]'
   HT40_PLUS = '[HT40+]'
   HT40_MINUS = '[HT40-]'
   SHORT_GI_20 = '[SHORT-GI-20]'
@@ -117,6 +118,8 @@ class HostapdVHTCapab(enum.StrEnum):
   SHORT_GI_80 = '[SHORT-GI-80]'
   SHORT_GI_160 = '[SHORT-GI-160]'
   RXLDPC = '[RXLDPC]'
+  VHT_CAP_MAX_AMPDULEN_EXP6 = '[MAX-A-MPDU-LEN-EXP6]'
+  VHT_CAP_MAX_AMPDULEN_EXP7 = '[MAX-A-MPDU-LEN-EXP7]'
 
 
 # The dict that returns whether a channel supports HT40+ or HT40-.
@@ -240,12 +243,21 @@ class WiFiConfig:
   # The setting of "Protected Management Frames" (IEEE802.11w).
   pmf: PMF | None = None
 
+  # Whether the WiFi network is hidden.
+  hidden: bool = False
+
   # Whether to access wide area network (WAN) through network address
   # translation(NAT). If true, each wireless network will be on its own subnet
   # with its own dhcp server, and traffic will only be routed to specific subnet
   # when needed. Otherwise, all wireless networks will be shared together with
   # the WAN and it assumes there's a DHCP server running in the WAN.
   access_wan_through_nat: bool = True
+
+  # If true, the DHCP server will be hosted on a bridge interface which is
+  # bound to the wireless interface. If False, the DHCP server will be hosted
+  # on the wireless interface. This field is only used when
+  # access_wan_through_nat is True.
+  host_subnet_on_bridge: bool = False
 
   # Specifies the maximum desired transmission power in dBm. The actual txpower
   # used depends on regulatory requirements.
@@ -257,8 +269,24 @@ class WiFiConfig:
   # will use its own MAC address as the Wi-Fi BSSID.
   use_random_bssid: bool = True
 
+  # If True, the AP will enable captive portal http server with predefined
+  # redirection url. In case of multiple WiFi BSSes, there is only one captive
+  # portal instance in a physical router. The captive portal service is started
+  # at the end of the start sequence of first BSS. And the running captive
+  # portal service is stopped at the end of stop sequence of last BSS.
+  enable_captive_portal: bool = False
+
+  # If True, the AP will resolve all DNS requests to the host IP address.
+  enable_resolve_to_host_ip: bool = False
+
   custom_hostapd_configs: Mapping[str, str] = dataclasses.field(
       default_factory=dict
+  )
+
+  # Custom DHCP configuration for the interface that will be created by the
+  # HostapdManager.
+  custom_dhcp_configs: Set[str] = dataclasses.field(
+      default_factory=set
   )
 
   def __post_init__(self):
@@ -272,15 +300,7 @@ class WiFiConfig:
   @property
   def band_type(self) -> BandType:
     """The band type."""
-    if 1 <= self.channel <= 14:
-      return BandType.BAND_2G
-    elif 36 <= self.channel <= 177:
-      return BandType.BAND_5G
-    else:
-      raise errors.ConfigError(
-          f'Unsupported WiFi channel: {self.channel}. See'
-          ' `constant.CHANNEL_TO_FREQUENCY` for all supported channels.'
-      )
+    return band_type_from_channel(self.channel)
 
   def _check_validity(self):
     """Checks whether the configurations are valid."""
@@ -369,6 +389,8 @@ class WifiInfo:
   password: str | None
   interface: str
   phy_name: str
+  bssid: str
+  bridge: str | None = None
 
 
 @dataclasses.dataclass
@@ -414,6 +436,24 @@ class FreqConfig:
         return f + 30
     raise errors.ConfigError(
         f'Got unsupported control frequency {control_freq} for width 80MHz.'
+    )
+
+  @property
+  def band_type(self) -> BandType:
+    """The band type."""
+    return band_type_from_channel(self.channel)
+
+
+def band_type_from_channel(channel: int) -> BandType:
+  """Gets the band type from the channel."""
+  if 1 <= channel <= 14:
+    return BandType.BAND_2G
+  elif 36 <= channel <= 177:
+    return BandType.BAND_5G
+  else:
+    raise errors.ConfigError(
+        f'Unsupported WiFi channel: {channel}. See'
+        ' `constant.CHANNEL_TO_FREQUENCY` for all supported channels.'
     )
 
 
