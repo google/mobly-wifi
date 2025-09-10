@@ -23,6 +23,18 @@ class ConfigError(BaseError):
   """Configuration error."""
 
 
+class CaptivePortalError(BaseError):
+  """Raised if some failure related to captive portal happened."""
+
+
+class HostapdSetPropertyError(BaseError):
+  """Raised if some failure related to setting hostapd property happened."""
+
+
+class HostapdChannelSwitchError(BaseError):
+  """Raised if some failure related to channel switching happened."""
+
+
 class HostapdStartError(BaseError):
   """Raised if it failed to start hostapd on the AP device."""
 

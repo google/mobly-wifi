@@ -22,6 +22,7 @@ from mobly import logger as mobly_logger
 from mobly import runtime_test_info
 from mobly import utils
 
+from mobly.controllers.wifi.lib import ssh as ssh_lib
 from mobly.controllers.wifi.lib import constants
 from mobly.controllers.wifi.lib import errors
 from mobly.controllers.wifi.lib import iw_utils
@@ -32,7 +33,12 @@ from mobly.controllers.wifi.lib import wifi_configs
 OpenWrtDevice = Any
 
 _FILE_TAG = 'sniffer'
-_INTERFACE = 'monitor0'
+_INTERFACE_2G = 'monitor0'
+_INTERFACE_5G = 'monitor1'
+_BAND_TO_INTERFACE = {
+    wifi_configs.BandType.BAND_2G: _INTERFACE_2G,
+    wifi_configs.BandType.BAND_5G: _INTERFACE_5G,
+}
 _REMOTE_DIR_NAME = 'sniffer'
 
 # Enable rotation with file size 50MB and at most 2 files for packet capturing.
@@ -50,6 +56,8 @@ _FILTER_IGNORE_QOS_DATA_FRAMES = r'not \(type data subtype qos-data\)'
 
 class SnifferManager:
   """The class for managing sniffer instances on the AP device."""
+  # Map from band type to a tuple of (capture_file_remote_path, remote_process)
+  remote_processes: dict[wifi_configs.BandType, tuple[str, ssh_lib.RemotePopen]]
 
   def __init__(self, device: 'OpenWrtDevice') -> None:
     self._device = device
@@ -62,15 +70,27 @@ class SnifferManager:
         },
     )
 
-    self._remote_process = None
+    self._remote_processes = {}
     self._capture_file_local_path = None
     self._local_work_dir = self._device.log_path
-    self._timestamp = mobly_logger.get_log_file_timestamp()
+
+  def initialize(self) -> None:
+    """Clean up existing sniffer processes and remove the capture directory."""
+    self._log.debug(
+        'Killing any existing tcpdump processes and removing the capture'
+        ' directory.'
+    )
+    self._device.ssh.execute_command(
+        command=constants.Commands.KILLALL.format(name='tcpdump'),
+        timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
+        ignore_error=True,
+    )
+    self._remove_capture_dir()
 
   @property
   def is_alive(self) -> bool:
     """True if the service is alive; False otherwise."""
-    return self._remote_process is not None
+    return bool(self._remote_processes)
 
   @property
   def _remote_work_dir(self) -> Any:
@@ -96,40 +116,40 @@ class SnifferManager:
         freq_config,
         capture_config,
     )
-    self._assert_not_running()
-    self._start_remote_process(freq_config, capture_config)
-    self._print_interface_state()
+    self._assert_not_running_on_band(freq_config.band_type)
+    interface = _BAND_TO_INTERFACE[freq_config.band_type]
+    self._start_remote_process(interface, freq_config, capture_config)
+    self._print_interface_state(interface)
     self._log.debug('Started packet capturing.')
 
-  def _assert_not_running(self):
-    """Asserts this manager is not running.
+  def _assert_not_running_on_band(self, band_type: wifi_configs.BandType):
+    """Asserts this manager is not running on the given band.
+
+    Args:
+      band_type: The band on which to confirm no running processes.
 
     Raises:
-      errors.SnifferManagerError: if this manager is running.
+      errors.SnifferManagerError: if this manager is running on the given band.
     """
-    if self.is_alive:
+    if band_type in self._remote_processes:
       raise errors.SnifferManagerError(
-          'Running multiple sniffer instances is not allowed.'
+          'Running multiple sniffer instances on the same band is not allowed.'
       )
 
   def _start_remote_process(
       self,
+      interface: str,
       freq_config: wifi_configs.FreqConfig,
       capture_config: wifi_configs.PcapConfig,
   ) -> None:
     """Starts the remote process to capture packets on the device."""
-    interface = _INTERFACE
     channel = freq_config.channel
 
     phys = iw_utils.get_all_phys(device=self._device)
     phy = iw_utils.get_phy_by_channel(phys, channel).name
 
-    # Kill any existing tcpdump instances.
-    self._device.ssh.execute_command(
-        command=constants.Commands.KILLALL.format(name='tcpdump'),
-        timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
-        ignore_error=True,
-    )
+    # Don't kill all existing tcpdump instances or remove the PCAP directory
+    # since packet capture might already be running on a different band.
     self._device.ssh.execute_command(
         command=constants.Commands.IW_DEV_DEL.format(interface=interface),
         timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
@@ -151,11 +171,9 @@ class SnifferManager:
         timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
     )
 
-    self._remove_capture_dir()
-
-    self._timestamp = mobly_logger.get_log_file_timestamp()
+    timestamp = mobly_logger.get_log_file_timestamp()
     capture_file_remote_path = os.path.join(
-        self._remote_work_dir, f'sniffer,{self._timestamp}.pcap'
+        self._remote_work_dir, f'sniffer,{timestamp}.pcap'
     )
 
     capture_args = []
@@ -163,7 +181,7 @@ class SnifferManager:
       capture_args.append(_KEEP_LATEST_PCAP_ARG)
     if capture_config.ignore_qos_data_frames:
       capture_args.append(_FILTER_IGNORE_QOS_DATA_FRAMES)
-    self._remote_process = self._device.ssh.start_remote_process(
+    remote_process = self._device.ssh.start_remote_process(
         command=constants.Commands.START_TCPDUMP.format(
             interface=interface,
             file_path=capture_file_remote_path,
@@ -171,19 +189,23 @@ class SnifferManager:
         ),
         get_pty=True,
     )
+    self._remote_processes[freq_config.band_type] = (
+        capture_file_remote_path,
+        remote_process,
+    )
 
   def _remove_capture_dir(self):
     self._device.ssh.rm_dir(self._remote_work_dir)
 
-  def _print_interface_state(self):
+  def _print_interface_state(self, interface):
     """Prints interface state."""
     self._log.debug('Printing sniffer interface state.')
     self._device.ssh.execute_command(
-        command=constants.Commands.IW_DEV_INFO.format(interface=_INTERFACE),
+        command=constants.Commands.IW_DEV_INFO.format(interface=interface),
         timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
     )
     self._device.ssh.execute_command(
-        command=constants.Commands.IP_LINK_SHOW.format(interface=_INTERFACE),
+        command=constants.Commands.IP_LINK_SHOW.format(interface=interface),
         timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
     )
 
@@ -191,33 +213,84 @@ class SnifferManager:
     self.teardown()
 
   def stop_capture(
-      self, current_test_info: runtime_test_info.RuntimeTestInfo | None = None
+      self,
+      current_test_info: runtime_test_info.RuntimeTestInfo | None = None,
+      band_type: wifi_configs.BandType | None = None,
   ):
-    """Stops pacaket capture."""
+    """Stops packet capture on the band specified, or all bands if no band is specified.
+
+    Args:
+      current_test_info: The current test info.
+      band_type: The band on which to stop packet capture.
+
+    If mergecap is enabled, the packet captures will be merged to a single file.
+    """
     if not self.is_alive:
       self._log.warning(
           'Skip stopping this sniffer manager because it is not running.'
       )
       return
-    self._log.debug('Stopping packet capturing.')
-    self._stop_remote_process()
+
+    # If band_type is specified, only stop packet capture on the specified band.
+    if band_type is not None:
+      self._stop_capture_on_band(band_type, current_test_info)
+      return
+    processes = self._remote_processes
+    self._remote_processes = {}
+    for band, (_, process) in list(processes.items()):
+      self._stop_remote_process(band, process)
+    self._log.debug('Stopped packet capturing on all bands.')
+
     if current_test_info is not None:
       local_dir = current_test_info.output_path
       self._pull_capture_files(local_dir)
     self._remove_capture_dir()
-    self._log.debug('Stopped packet capturing.')
 
-  def _stop_remote_process(self):
-    """Stops the remote process."""
-    if (proc := self._remote_process) is None:
+  def _stop_capture_on_band(
+      self,
+      band_type: wifi_configs.BandType,
+      current_test_info: runtime_test_info.RuntimeTestInfo | None = None,
+  ):
+    """Stops packet capture on the specified band."""
+    if band_type not in self._remote_processes:
+      self._log.warning(
+          'Skip stopping packet capture on band %s because it is not running.',
+          band_type,
+      )
       return
+    capture_file_remote_path, process = self._remote_processes.pop(band_type)
+    self._stop_remote_process(band_type, process)
+    self._log.debug('Stopped packet capture on band %s.', band_type)
 
-    self._remote_process = None
+    if current_test_info is not None:
+      local_dir = current_test_info.output_path
+      self._pull_capture_files(local_dir, capture_file_remote_path)
+
+  def _stop_remote_process(
+      self,
+      band_type: wifi_configs.BandType,
+      proc: ssh_lib.RemotePopen,
+  ):
+    """Stops remote process and set the ip link down."""
     proc.send_signal(signal_id=signal.SIGINT, assert_process_exit=True)
     self._log.debug('Sniffer process output: %s', proc.communicate())
 
-  def _pull_capture_files(self, local_dir: str) -> None:
+    # Set the ip link down
+    self._device.ssh.execute_command(
+        command=constants.Commands.IP_LINK_DOWN.format(
+            interface=_BAND_TO_INTERFACE[band_type]
+        ),
+        timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
+    )
+
+  def _pull_capture_files(
+      self, local_dir: str, remote_pcap_file: str | None = None
+  ) -> None:
     """Pulls the capture files from the device to the host.
+
+    If remote_pcap_file is provided, this will only pull PCAPs corresponding
+    to the given file name. If there are multiple PCAPs with the same base name,
+    they will be merged into a single file if possible.
 
     If multiple capture files are found, this will use `mergecap` on host to
     merge them into one file. If `mergecap` is not installed, this will directly
@@ -225,6 +298,7 @@ class SnifferManager:
 
     Args:
       local_dir: the local directory to pull the capture files to.
+      remote_pcap_file: a specific pcap file to pull from the device.
     """
     # Print all capture files info for debugging.
     self._device.ssh.execute_command(
@@ -240,8 +314,22 @@ class SnifferManager:
       )
       return
 
-    self._device.ssh.pull_remote_directory(self._remote_work_dir, local_dir)
-    pcap_local_paths = [os.path.join(local_dir, name) for name in pcap_files]
+    pcap_local_paths = []
+    basename = os.path.basename(remote_pcap_file) if remote_pcap_file else ''
+    for pcap_file in pcap_files:
+      # If remote_pcap_file is provided, only pull the PCAPs with the same
+      # basename as the remote_pcap_file. Otherwise, pull all PCAPs.
+      if basename in pcap_file:
+        self._device.ssh.pull_to_directory(
+            os.path.join(self._remote_work_dir, pcap_file), local_dir
+        )
+        self._device.ssh.rm_file(
+            os.path.join(self._remote_work_dir, pcap_file)
+        )
+        pcap_local_paths.append(os.path.join(local_dir, pcap_file))
+    if not pcap_local_paths:
+      self._log.warning('No packet capture files pulled to local directory.')
+      return
 
     # Skips merge if `mergecap` is not installed.
     which_mergecap = utils.run_command(['which', 'mergecap'])
@@ -259,7 +347,10 @@ class SnifferManager:
 
   def _merge_capture_files(self, pcap_local_paths: list[str], local_dir: str):
     """Merges multiple captures files into one capture file."""
-    new_file_name = f'sniffer,merged,{self._timestamp}.pcap'
+    # Get a unique timestamp for the merged file name to avoid overwriting
+    # previously merged files.
+    timestamp = mobly_logger.get_log_file_timestamp()
+    new_file_name = f'sniffer,merged,{timestamp}.pcap'
     new_file_path = os.path.join(local_dir, new_file_name)
     self._device.log.debug(
         'Merging following capture files into one file %s: %s',

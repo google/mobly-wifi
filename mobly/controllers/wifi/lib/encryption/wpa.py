@@ -34,6 +34,8 @@ class Cipher(enum.StrEnum):
 
   TKIP = 'TKIP'  # Temporal Key Integrity Protocol
   CCMP = 'CCMP'  # AES in Counter mode with CBC-MAC (CCMP-128)
+  GCMP = 'GCMP'  # Galois/Counter Mode Protocol (GCMP-128)
+  GCMP256 = 'GCMP-256'  # Galois/Counter Mode Protocol (GCMP-256)
 
 
 @enum.unique
@@ -43,6 +45,8 @@ class KeyMgmt(enum.StrEnum):
   WPA_PSK = 'WPA-PSK'  # WPA-Personal / WPA2-Personal
   WPA_PSK_SHA256 = 'WPA-PSK-SHA256'  # WPA2-Personal using SHA256
   SAE = 'SAE'  # WPA3-Personal
+  SAE_EXT_KEY = 'SAE-EXT-KEY'  # WPA3-SAE-EXT
+  FT_PSK = 'FT-PSK'  # Fast Transition PSK
 
 
 @enum.unique
@@ -54,11 +58,26 @@ class Mode(enum.Enum):
   PURE_WPA3 = 'PureWPA3'
   MIXED = 'WPAWPA2'
   MIXED_WPA3 = 'WPA2WPA3'
+  PURE_WPA3_EXT = 'PureWPA3EXT'
+  MIXED_WPA3_EXT = 'WPA2WPA3WPA3EXT'
 
 
 _MODES_USED_WPA = (Mode.PURE_WPA, Mode.MIXED)
-_MODES_USED_WPA2 = (Mode.PURE_WPA2, Mode.PURE_WPA3, Mode.MIXED, Mode.MIXED_WPA3)
-_MODES_USED_WPA3 = (Mode.PURE_WPA3, Mode.MIXED_WPA3)
+_MODES_USED_WPA2 = (
+    Mode.PURE_WPA2,
+    Mode.PURE_WPA3,
+    Mode.MIXED,
+    Mode.MIXED_WPA3,
+    Mode.PURE_WPA3_EXT,
+    Mode.MIXED_WPA3_EXT,
+)
+_MODES_USED_WPA3 = (
+    Mode.PURE_WPA3,
+    Mode.MIXED_WPA3,
+    Mode.PURE_WPA3_EXT,
+    Mode.MIXED_WPA3_EXT,
+)
+_MODES_USED_WPA3_EXT = (Mode.PURE_WPA3_EXT, Mode.MIXED_WPA3_EXT)
 
 
 def _generate_wifi_password():
@@ -164,10 +183,12 @@ class Wpa(base_encryption_config.BaseEncryptionConfig):
     if not key_mgmt:
       key_mgmt = set()
       # Include the minimum required key management algorithms.
-      if self._mode != Mode.PURE_WPA3:
+      if self._mode != Mode.PURE_WPA3 and self._mode != Mode.PURE_WPA3_EXT:
         key_mgmt.add(KeyMgmt.WPA_PSK.value)
       if self._mode in _MODES_USED_WPA3:
         key_mgmt.add(KeyMgmt.SAE.value)
+      if self._mode in _MODES_USED_WPA3_EXT:
+        key_mgmt.add(KeyMgmt.SAE_EXT_KEY.value)
     hostapd_conf.update('wpa_key_mgmt', ' '.join(key_mgmt))
 
     # PMF can be 0 (disabled) for WPA-PSK.

@@ -76,7 +76,13 @@ class RemotePathDoesNotExistError(Error):
 
 
 class ExecuteCommandError(Error):
-  """Raised when a ssh command encounters an error."""
+  """Raised when a ssh command encounters an error.
+
+  Attributes:
+    command_results: The full command results including: exit code, stdout,
+      and stderr.
+    command: The command that was executed.
+  """
 
   _COMMAND_EXCEPTION_TEMPLATE = """
   Call exited with non-zero return code of "{return_code:d}".
@@ -89,6 +95,9 @@ class ExecuteCommandError(Error):
   **********************End of error message*****************
   """
 
+  command_results: CommandResults = None
+  command: str = ''
+
   def __init__(self, ssh: SSHProxy, command: str,
                command_results: CommandResults) -> None:
     message = self._COMMAND_EXCEPTION_TEMPLATE.format(
@@ -97,6 +106,8 @@ class ExecuteCommandError(Error):
         stdout=command_results.output,
         stderr=command_results.error,
     )
+    self.command_results = command_results
+    self.command = command
     super().__init__(ssh, message)
 
 

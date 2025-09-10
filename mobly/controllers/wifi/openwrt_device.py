@@ -16,11 +16,14 @@
 
 from collections.abc import Iterator, Mapping, Sequence
 import contextlib
+import dataclasses
 import datetime
+import ipaddress
 import itertools
 import logging
 import os
 import time
+import traceback
 from typing import Any
 
 from mobly import logger as mobly_logger
@@ -32,12 +35,14 @@ import paramiko
 from mobly.controllers.wifi.lib import ssh as ssh_lib
 from mobly.controllers.wifi.lib import constants
 from mobly.controllers.wifi.lib import device_info_utils
+from mobly.controllers.wifi.lib import hostapd_manager
 from mobly.controllers.wifi.lib import iw_utils
 from mobly.controllers.wifi.lib import sniffer_manager
 from mobly.controllers.wifi.lib import utils as wifi_utils
 from mobly.controllers.wifi.lib import wifi_configs
 from mobly.controllers.wifi.lib import wifi_manager
 from mobly.controllers.wifi.lib.services import system_log_service
+from mobly.controllers.wifi.utils import ip_utils
 
 
 MOBLY_CONTROLLER_CONFIG_NAME = 'OpenWrtDevice'
@@ -121,6 +126,35 @@ def _initialize_devices(
   return initialized_devices
 
 
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class IpInterface:
+  """IP Interface class for OpenWrt device.
+
+  Attributes:
+    id: The interface id.
+    name: The interface name.
+    type: The interface type.
+    mac_address: The MAC address of the interface.
+    state: The state of the interface.
+    virtual_of: The interface that this interface is virtual of.
+    bridge: The bridge of the interface.
+    ip: The IPv4 address of the interface.
+    subnet: The IPv4 subnet of the interface.
+    iw_interface: The interface information from `iw dev` command if this
+      interface is a wireless interface.
+  """
+  id: int
+  name: str
+  type: str
+  mac_address: str
+  state: str
+  virtual_of: str | None = None
+  bridge: str | None = None
+  ip: ipaddress.IPv4Address | None = None
+  subnet: ipaddress.IPv4Network | None = None
+  iw_interface: iw_utils.Interface | None = None
+
+
 class OpenWrtDevice:
   """Mobly controller for AP devices running on the OpenWrt system.
 
@@ -150,6 +184,11 @@ class OpenWrtDevice:
     self._skip_init_reboot = wifi_utils.convert_testbed_bool_value(
         config.get('skip_init_reboot', False)
     )
+    self._skip_init_package_installation = (
+        wifi_utils.convert_testbed_bool_value(
+            config.get('skip_init_package_installation', False)
+        )
+    )
     self.serial = f'{self._hostname}:{self._ssh_port}'
     self._device_info = None
 
@@ -171,6 +210,7 @@ class OpenWrtDevice:
 
     self._remote_work_dir = None
     self._wifi_id_counter = itertools.count(0)
+    self._last_reboot_error = None
 
     self._ssh = self._create_ssh_client()
     self._wifi_manager = wifi_manager.WiFiManager(device=self)
@@ -229,18 +269,7 @@ class OpenWrtDevice:
         open_sftp=False, timeout=_SSH_CONNECTION_TIMEOUT.total_seconds()
     )
 
-    packages = constants.REQUIRED_PACKAGES_RELEASED_IMAGE
-    if self.device_info.get(
-        'device_name', None
-    ) == constants.ApModel.BPIR3 and wifi_utils.is_using_custom_image(
-        device=self
-    ):
-      packages = constants.REQUIRED_PACKAGES_BPIR3_AND_CROS_BUILT_IMAGE
-    elif wifi_utils.is_using_openwrt_snapshot_image(
-        self.device_info['release']
-    ):
-      packages = constants.REQUIRED_PACKAGES_SNAPSHOT_IMAGE
-
+    packages = self._get_required_packages()
     for pkg in packages:
       self._install_package(pkg)
 
@@ -248,10 +277,30 @@ class OpenWrtDevice:
       self.log.info('Skipped reboot when initializing this controller object.')
       self._ssh.open_sftp()
       self._wifi_manager.initialize()
+      self._sniffer_manager.initialize()
     else:
       self.reboot()
 
     self._register_syslog_service()
+
+  def _get_required_packages(self) -> Sequence[str]:
+    """Returns all required OpenWrt packages for this device."""
+    if self._skip_init_package_installation:
+      return tuple()
+
+    if self.device_info.get(
+        'device_name', None
+    ) == constants.ApModel.BPIR3 and wifi_utils.is_using_custom_image(
+        device=self
+    ):
+      return constants.REQUIRED_PACKAGES_BPIR3_AND_CROS_BUILT_IMAGE
+
+    if wifi_utils.is_using_openwrt_snapshot_image(self.device_info['release']):
+      # By default, the controller should not install any packages on a snapshot
+      # image.
+      return tuple()
+
+    return constants.REQUIRED_PACKAGES_RELEASED_IMAGE
 
   def _install_package(self, package: str):
     """Installs a package on the device through `opkg`."""
@@ -308,6 +357,7 @@ class OpenWrtDevice:
       self._ssh.disconnect()
       self._wait_for_boot_completion()
       self._wifi_manager.initialize()
+      self._sniffer_manager.initialize()
 
   def _wait_for_boot_completion(self) -> None:
     """Waits for a ssh connection can be reestablished.
@@ -315,15 +365,22 @@ class OpenWrtDevice:
     Raises:
       Error: Raised if booting process timed out.
     """
+    self._last_reboot_error = None
     if not wifi_utils.wait_for_predicate(
         predicate=self._is_reboot_ready,
         timeout=_BOOT_STATUS_CHECK_TIMEOUT,
         interval=_BOOT_STATUS_CHECK_INTERVAL,
     ):
-      raise Error(
+      message = (
           f'{repr(self)} Booting process timed out after'
           f' {_BOOT_STATUS_CHECK_TIMEOUT.total_seconds()} seconds.'
       )
+      if self._last_reboot_error is not None:
+        error_traceback = '\n'.join(
+            traceback.format_exception(self._last_reboot_error)
+        )
+        message += f' Last error we caught:\n{error_traceback}'
+      raise Error(message)
 
   def ssh_connect(self):
     """Connects to the device through ssh with sftp enabled."""
@@ -348,10 +405,11 @@ class OpenWrtDevice:
         ConnectionResetError,
         TimeoutError,
         ssh_lib.ExecuteCommandError,
-    ):
+    ) as e:
       # ssh connect may fail during certain period of booting
       # process, which is normal. Ignoring these errors.
-      self.log.exception('Ignoring the exception when rebooting.')
+      self._last_reboot_error = e
+      self.log.info('Waiting for device reboot completion.')
       self._ssh.disconnect()
       return False
 
@@ -424,6 +482,65 @@ class OpenWrtDevice:
   def stop_all_wifi(self) -> None:
     self._wifi_manager.stop_all_wifi()
 
+  def send_bss_tm_request(
+      self,
+      source_wifi_info: wifi_configs.WifiInfo,
+      params: hostapd_manager.HostapdBssTmReqParams,
+  ) -> str:
+    """Sends a BSS Transition Management Request from the source AP.
+
+    Args:
+      source_wifi_info: The WifiInfo object for the source AP sending the
+        request.
+      params: The parameters for the BSS TM Request.
+
+    Returns:
+      The stdout from the hostapd_cli command.
+
+    Raises:
+      Error: If the source_wifi_info is not found among running Wi-Fi
+        instances or if the associated HostapdManager is not found.
+    """
+    return self._wifi_manager.send_bss_tm_request(source_wifi_info, params)
+
+  def set_hostapd_property(
+      self, wifi_info: wifi_configs.WifiInfo, property_name: str, value: str
+  ) -> None:
+    """Sets the property of the hostapd daemon.
+
+    This function modifies a specific property of the running hostapd instance.
+
+    Args:
+      wifi_info: The `WifiInfo` object for the AP whose property is to be set.
+        This object's ID is used to identify the running hostapd instance.
+      property_name: The name of the property to configure.
+      value: The value of the property to set.
+    """
+    self._wifi_manager.set_hostapd_property(
+        wifi_info, property_name, value
+    )
+
+  def channel_switch(
+      self,
+      wifi_info: wifi_configs.WifiInfo,
+      target_channel: int,
+      beacon_count: int = 1,
+      optional_args: Sequence[str] | None = None,
+  ) -> None:
+    """Performs a channel switch from the current channel to the target channel.
+
+    Args:
+      wifi_info: The `WifiInfo` object for the AP whose channel is to be
+        switched.
+      target_channel: The target channel to switch to.
+      beacon_count: The number of beacons to send before switching channels.
+      optional_args: Optional arguments to pass to the hostapd_cli chan-switch
+        command.
+    """
+    self._wifi_manager.channel_switch(
+        wifi_info, target_channel, beacon_count, optional_args
+    )
+
   def get_all_known_stations(
       self, wifi_info: wifi_configs.WifiInfo
   ) -> Sequence[iw_utils.Station]:
@@ -461,6 +578,49 @@ class OpenWrtDevice:
     return iw_utils.get_station_info(
         device=self, interface=wifi_info.interface, mac_address=mac_address
     )
+
+  def get_interface_ip_iw_map(self) -> Mapping[str, IpInterface]:
+    """Gets all interfaces and their information.
+
+    This method also correlates the information from `iw dev` command with the
+    information from `ip addr show` command to get the wireless interface
+    information on matched interface names.
+
+    Returns:
+      A mapping of interface name to interface information.
+    """
+    interfaces: Sequence[ip_utils.IpAddrInterface] = (
+        ip_utils.get_all_ip_addr_interfaces(self)
+    )
+    iw_interfaces = iw_utils.get_all_interfaces(self)
+    iw_interfaces_map = {
+        interface.name: interface for interface in iw_interfaces
+    }
+    # IP address is in the format of `ip_addr/mask_len`.
+    parse_ipv4_addr = (
+        lambda ip_addr: ipaddress.IPv4Address(ip_addr.split('/')[0])
+        if ip_addr is not None
+        else None
+    )
+
+    parse_subnet_addr = (
+        lambda subnet_addr: ipaddress.IPv4Network(subnet_addr, strict=False)
+        if subnet_addr is not None
+        else None
+    )
+
+    return {
+        intf.name: IpInterface(
+            id=intf.id,
+            name=intf.name,
+            type=intf.link_type,
+            mac_address=intf.mac_address,
+            state=intf.state,
+            ip=parse_ipv4_addr(intf.ipv4_address),
+            subnet=parse_subnet_addr(intf.ipv4_address),
+            iw_interface=iw_interfaces_map.get(intf.name),
+        ) for intf in interfaces
+    }
 
   def get_all_wifi_ssid(self) -> Sequence[str]:
     """Gets all currently broadcasting Wi-Fi SSIDs."""
@@ -503,10 +663,14 @@ class OpenWrtDevice:
     )
 
   def stop_packet_capture(
-      self, current_test_info: runtime_test_info.RuntimeTestInfo | None = None
+      self,
+      current_test_info: runtime_test_info.RuntimeTestInfo | None = None,
+      band_type: wifi_configs.BandType | None = None,
   ):
-    """Stops pacaket capture."""
-    self._sniffer_manager.stop_capture(current_test_info=current_test_info)
+    """Stops packet capture on the band specified, or all bands if no band is specified."""
+    self._sniffer_manager.stop_capture(
+        current_test_info=current_test_info, band_type=band_type
+    )
 
   def get_capture_file(self) -> str | None:
     """Gets the full path of the last capture."""

@@ -130,10 +130,18 @@ class Commands(enum.StrEnum):
       'ip addr add {server_ip}/{network_mask_len} dev {iface} broadcast'
       ' {broadcast_ip}'
   )
+  IP_ADDR_SHOW = 'ip addr show'
   IP_LINK_SHOW = 'ip link show {interface}'
   IP_LINK_UP = 'ip link set {interface} up'
+  IP_LINK_DOWN = 'ip link set {interface} down'
+  IP_LINK_DELETE = 'ip link delete {interface}'
+  IP_LINK_DELETE_BRIDGE = 'ip link delete {interface} type bridge'
+  IP_LINK_ADD_VETH_PAIR = 'ip link add {veth} type veth peer name {veth_peer}'
+  IP_LINK_ADD_BRIDGE = 'ip link add {interface} type bridge'
+  IP_LINK_BIND = 'ip link set {interface} master {bindee_interface}'
 
   IW_PHY = 'iw phy'
+  IW_LIST = 'iw list'
   IW_PHY_INFO = 'iw phy {phy} info'
   IW_REG_SET = 'iw reg set {country_code}'
   IW_REG_GET = 'iw reg get'
@@ -143,6 +151,7 @@ class Commands(enum.StrEnum):
   IW_DEV_ADD = 'iw phy {phy} interface add {interface} type managed'
   IW_DEV_ADD_MONITOR = 'iw phy {phy} interface add {interface} type monitor'
   IW_DEV_INFO = 'iw dev {interface} info'
+  IW_DEV_LINK = 'iw dev {interface} link'
   IW_DEV_STATION_DUMP = 'iw dev {interface} station dump'
   IW_DEV_STATION_GET = 'iw dev {interface} station get {station_mac_address}'
   IW_DEV_SET_FREQ = 'iw dev {interface} set freq {freq_args}'
@@ -174,6 +183,7 @@ class Commands(enum.StrEnum):
   OPKG_INSTALL = 'opkg install {package}'
 
   HOSTAPD_START = '/usr/sbin/hostapd -dd -t -K {conf_path}'
+  HOSTAPD_CLI = 'hostapd_cli -p {ctrl_path} -i {interface} {command_args}'
 
   KILLALL = 'killall {name}'
 
@@ -193,6 +203,9 @@ WAN_INTERFACE = 'br-lan'
 # Constant fot the name of hostapd.
 HOSTAPD = 'hostapd'
 
+# Consant for the name of dnsmasq.
+DNSMASQ = 'dnsmasq'
+
 
 # The AP device SSH username.
 SSH_USERNAME = 'root'
@@ -207,22 +220,13 @@ OPENWRT_PACKAGE_SUDO = 'sudo'
 OPENWRT_PACKAGE_HOSTAPD = 'hostapd'
 OPENWRT_PACKAGE_TCPDUMP = 'tcpdump'
 OPENWRT_PACKAGE_IPERF3 = 'iperf3'
-
-# Required packages when using an OpenWrt image built against snapshot.
-# * Do NOT include `iptables` because snapshot images have limitation on
-#   installing kernel version dependent modules. Reference:
-#   https://openwrt.org/releases/snapshot
-REQUIRED_PACKAGES_SNAPSHOT_IMAGE = (
-    OPENWRT_PACKAGE_SFTP,
-    OPENWRT_PACKAGE_SUDO,
-    OPENWRT_PACKAGE_TCPDUMP,
-)
+OPENWRT_PACKAGE_OPENSSH_SERVER = 'openssh-server'
 
 # Required packages when using an official OpenWrt image.
 # * Do NOT include `hostapd` because it might be installed but not through
 #   opkg.
 REQUIRED_PACKAGES_RELEASED_IMAGE = (
-    OPENWRT_PACKAGE_SFTP,
+    OPENWRT_PACKAGE_OPENSSH_SERVER,
     OPENWRT_PACKAGE_SUDO,
     OPENWRT_PACKAGE_TCPDUMP,
 )
@@ -241,3 +245,5 @@ DEVICE_INFO_PATTERN = re.compile(
     r"DISTRIB_DESCRIPTION='(?P<description>.*)'\n"
     r"DISTRIB_TAINTS='(?P<taints>.*)'"
 )
+
+VERSION_SNAPSHOT = 'SNAPSHOT'

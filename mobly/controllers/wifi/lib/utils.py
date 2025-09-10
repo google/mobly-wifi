@@ -16,6 +16,7 @@
 
 from collections.abc import Callable
 import datetime
+import logging
 import string
 import time
 from typing import Any
@@ -27,7 +28,7 @@ from mobly.controllers.wifi.lib import constants
 
 OpenWrtDevice = Any
 
-_OPENWRT_NEW_FIREWALL_RULE_VERSION = version.parse('22.03')
+_OPENWRT_NEW_FIREWALL_RULE_VERSION = version.Version('22.03')
 
 
 def is_hex_string(s: str) -> bool:
@@ -64,13 +65,25 @@ def wait_for_predicate(
 
 def is_new_firewall_rule_version(version_number: str) -> bool:
   """Returns True if OpenWrt version is new firewall rule, False otherwise."""
-  parsed_version = version.parse(version_number)
-  return parsed_version >= _OPENWRT_NEW_FIREWALL_RULE_VERSION
+  # The version number will be 'SNAPSHOT' for the latest development images.
+  if version_number == constants.VERSION_SNAPSHOT:
+    return True
+  try:
+    parsed_version = version.Version(version_number)
+    return parsed_version >= _OPENWRT_NEW_FIREWALL_RULE_VERSION
+  except version.InvalidVersion:
+    # This should not happen.
+    logging.warning(
+        'Got unknown version number string "%s", assuming it is using the'
+        'latest firewall management tools.',
+        version_number,
+    )
+    return True
 
 
 def is_using_openwrt_snapshot_image(release: str) -> bool:
   """Returns True if the image is built against SNAPSHOT, False otherwise."""
-  return release == 'SNAPSHOT'
+  return release == constants.VERSION_SNAPSHOT
 
 
 def is_using_custom_image(device: 'OpenWrtDevice') -> bool:

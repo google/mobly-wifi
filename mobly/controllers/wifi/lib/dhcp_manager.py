@@ -152,6 +152,8 @@ class DhcpManager:
       device: 'OpenWrtDevice',
       wifi_id: int,
       iface: str,
+      custom_dhcp_configs: Set[str] | None = None,
+      resolve_to_host_ip: bool = False,
       base_logger: (
           logging.Logger | mobly_logger.PrefixLoggerAdapter | None
       ) = None,
@@ -163,6 +165,9 @@ class DhcpManager:
       wifi_id: The ID of the WiFi network where we will operate a DHCP server
         instance.
       iface: The wireless interface name.
+      custom_dhcp_configs: The custom DHCP configurations for iface.
+      resolve_to_host_ip: If True, this DHCP manager will resolve all DNS
+        requests to its own IP address.
       base_logger: The base logger. Based on that logger, this class will prefix
         each log entry with string "[DhcpManager]".
     """
@@ -170,6 +175,8 @@ class DhcpManager:
     self._wifi_id = wifi_id
     self._subnet_id = _subnet_id_generator.get()
     self._remote_process = None
+    self.custom_dhcp_configs = custom_dhcp_configs
+    self._resolve_to_host_ip = resolve_to_host_ip
     base_logger = base_logger or device.log
     self._log = mobly_logger.PrefixLoggerAdapter(
         base_logger,
@@ -231,6 +238,11 @@ class DhcpManager:
             filename=self._get_lease_filename(),
         ),
     )
+    if self._resolve_to_host_ip:
+      config_content += f'address=/#/{self._config.server_ip}\n'
+    if self.custom_dhcp_configs is not None:
+      for value in self.custom_dhcp_configs:
+        config_content += f'dhcp-option={self._config.iface},{value}\n'
 
     # Write dnsmasq config to a remote file.
     filename = self._get_conf_filename()
@@ -247,7 +259,7 @@ class DhcpManager:
   def _start_dnsmasq_process(self, config_remote_path: str):
     local_path = self._get_local_path(filename=self._get_log_filename())
     command_elements = [
-        'dnsmasq',
+        constants.DNSMASQ,
         f'--conf-file={config_remote_path}',
         '--no-daemon',
     ]
