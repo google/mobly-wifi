@@ -18,16 +18,60 @@ See following file for an example of the `iw phy` output:
 //testing/mobly/platforms/wifi/test_data/iw_phy_output.txt
 """
 
-from collections.abc import Sequence
+from collections.abc import Sequence, Mapping
+import contextlib
 import dataclasses
 import enum
 import re
-from typing import Any, Self
+from typing import Any, Callable, Self
 
 from mobly.controllers.wifi.lib import constants
 from mobly.controllers.wifi.lib import errors
+from mobly.controllers.wifi.lib import ssid as ssid_lib
 
 OpenWrtDevice = Any
+
+
+class ChannelWidth(enum.StrEnum):
+  """iw channel width definitions.
+
+  See channel_width_name() in
+  https://git.kernel.org/pub/scm/linux/kernel/git/jberg/iw.git/tree/interface.c
+  """
+
+  NL80211_CHAN_WIDTH_20_NOHT = '20 MHz (no HT)'
+  NL80211_CHAN_WIDTH_20 = '20 MHz'
+  NL80211_CHAN_WIDTH_40 = '40 MHz'
+  NL80211_CHAN_WIDTH_80 = '80 MHz'
+  NL80211_CHAN_WIDTH_80P80 = '80+80 MHz'
+  NL80211_CHAN_WIDTH_160 = '160 MHz'
+  NL80211_CHAN_WIDTH_5 = '5 MHz'
+  NL80211_CHAN_WIDTH_10 = '10 MHz'
+  NL80211_CHAN_WIDTH_1 = '1 MHz'
+  NL80211_CHAN_WIDTH_2 = '2 MHz'
+  NL80211_CHAN_WIDTH_4 = '4 MHz'
+  NL80211_CHAN_WIDTH_8 = '8 MHz'
+  NL80211_CHAN_WIDTH_16 = '16 MHz'
+  NL80211_CHAN_WIDTH_320 = '320 MHz'
+
+  @classmethod
+  def from_str(cls, value: str) -> Self | None:
+    if value is None:
+      return None
+    for member in cls:
+      if member.value == value:
+        return member
+    return None
+
+
+class Type(enum.StrEnum):
+  """iw interface type definitions."""
+  AP = 'AP'
+  MESH_POINT = 'mesh point'
+  MONITOR = 'monitor'
+  MANAGED = 'managed'
+
+_IW_MLD_WITH_LINKS = 'MLD with links:'
 
 _FREQUENCY_INFO_RE = re.compile(
     r'.*\* \d+(\.\d)? MHz \[(?P<channel>\d+)\](?: \([0-9.]+ dBm\))?(?:'
@@ -44,6 +88,9 @@ _PHY_NAME_RE_GROUP_NAME = 'name'
 
 _PHY_INDEX_RE = re.compile(r'wiphy index: (?P<phyindex>\d+)')
 _PHY_INDEX_RE_GROUP_PHYINDEX = 'phyindex'
+
+_CAPABILITIES_RE = re.compile('Capabilities: 0x[0-9a-fA-F]+')
+_VHT_CAPABILITIES_RE = re.compile(r'VHT Capabilities \(0x[0-9a-fA-F]+\):')
 
 _PREFIX_TAB_CHARACTERS_RE = re.compile(r'^\t+')
 
@@ -90,13 +137,49 @@ class Channel:
 
 @dataclasses.dataclass(frozen=True, eq=True, order=True)
 class Band:
-  """Band information in the `Bands` section of `iw phy` output."""
+  """Band information in the `Bands` section of `iw phy` output.
+
+  Attributes:
+    num: The index of the band.
+    channels: The channels in this band. This represents the `Frequencies:`
+      section in iw output.
+    capabilities: The capabilities of this band. This represents the
+      `Capabilities: <bitmap>` section in iw output.
+    vht_capabilities: The VHT capabilities of this band. This represents the
+      `VHT Capabilities (<bitmap>):` section in iw output.
+  """
 
   num: int
   channels: Sequence[Channel]
+  capabilities: Sequence[str]
+  vht_capabilities: Sequence[str]
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class MLDLink:
+  """MLD link information.
+
+  Attributes:
+    link_id: The ID of the MLD link.
+    link_addr: The MAC address of the MLD link.
+    channel: The operating channel of the link.
+    freq: The frequency of operating channel of the link.
+    width: The channel bandwidth of operating channel of the link.
+    center1: The center1 frequency of the operating channel of the link.
+    center2: The center2 frequency of the operating channel of the link, if
+      80+80 is used.
+  """
+
+  link_id: int
+  link_addr: str
+  channel: int | None = None
+  freq: int | None = None
+  width: ChannelWidth | None = None
+  center1: int | None = None
+  center2: int | None = None
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class Interface:
   """Interface information in the `iw dev` output.
 
@@ -106,12 +189,28 @@ class Interface:
     type: Specify the operating mode of the interface.
     ssid: The SSID of the interface, None if the interface is not a broadcasting
       Wi-Fi.
+    phyindex: The index of the underlying phy of the interface.
+    ifindex: The index of the interface in Linux wireless system.
+    channel: The operating channel of the interface.
+    freq: The frequency of operating channel.
+    width: The channel bandwidth of operating channel.
+    center1: The center1 frequency of the operating channel.
+    center2: The center2 frequency of the operating channel, if 80+80 is used.
+    mld_links: MLD links of the interface if it is an MLD interface.
   """
 
   name: str
   addr: str
-  type: str
+  type: Type
+  phyindex: int
+  ifindex: int
   ssid: str | None = None
+  channel: int | None = None
+  freq: int | None = None
+  width: ChannelWidth | None = None
+  center1: int | None = None
+  center2: int | None = None
+  mld_links: Sequence[MLDLink] | None = None
 
 
 @dataclasses.dataclass(frozen=True, eq=True, order=True)
@@ -154,7 +253,7 @@ class _TreeNode:
     """Finds the direct child of which the text matches the given pattern."""
     matched_children = []
     for c in self.children:
-      if (match := pattern.match(c.text)) is not None:
+      if (match := pattern.match(c.text)) is not None:  # pyrefly: ignore[no-matching-overload]
         matched_children.append((c, match))
     if not matched_children:
       raise IwOutputParsingError(
@@ -170,7 +269,7 @@ class _TreeNode:
       self, *, pattern: re.Pattern[str]
   ) -> Sequence[Self]:
     """Finds all direct children of which the text match the regex pattern."""
-    return [c for c in self.children if pattern.match(c.text)]
+    return [c for c in self.children if pattern.match(c.text)]  # pyrefly: ignore[no-matching-overload]
 
   def find_child(self, *, text: str) -> Self:
     """Finds the direct child of which the text equals the given text."""
@@ -322,7 +421,7 @@ def _parse_tree_to_channels(node: _TreeNode) -> Sequence[Channel]:
   """Parses the tree root at the given `node` to be channels."""
   channels = []
   for child in node.children:
-    match = _FREQUENCY_INFO_RE.match(child.text)
+    match = _FREQUENCY_INFO_RE.match(child.text)  # pyrefly: ignore[no-matching-overload]
     if match is None:
       continue
     channel = int(match.group(_FREQUENCY_INFO_RE_GROUP_CHANNEL))
@@ -334,9 +433,19 @@ def _parse_tree_to_channels(node: _TreeNode) -> Sequence[Channel]:
   return channels
 
 
+def _parse_tree_child_nodes_to_list(node: _TreeNode) -> Sequence[str]:
+  """Parses text of all direct children nodes of the tree root to a list."""
+  child_texts = []
+  for child in node.children:
+    if not child.text:
+      continue
+    child_texts.append(child.text.strip())
+  return child_texts
+
+
 def _parse_tree_to_band(node: _TreeNode) -> Band:
   """Parses the tree root at the given `node` to be a band."""
-  match = _BAND_RE.match(node.text)
+  match = _BAND_RE.match(node.text)  # pyrefly: ignore[no-matching-overload]
   if match is None:
     raise IwOutputParsingError(
         f'Did not find Band number in node: "{node.text}"'
@@ -345,7 +454,20 @@ def _parse_tree_to_band(node: _TreeNode) -> Band:
   channels = _parse_tree_to_channels(
       node.find_child(text=_TEXT_LABEL_FREQUENCIES)
   )
-  return Band(num=num, channels=channels)
+  capabilities = []
+  vht_capabilities = []
+  with contextlib.suppress(IwOutputParsingError):
+    cap_node, _ = node.find_child_by_regex(pattern=_CAPABILITIES_RE)
+    capabilities = _parse_tree_child_nodes_to_list(cap_node)
+  with contextlib.suppress(IwOutputParsingError):
+    vht_cap_node, _ = node.find_child_by_regex(pattern=_VHT_CAPABILITIES_RE)
+    vht_capabilities = _parse_tree_child_nodes_to_list(vht_cap_node)
+  return Band(
+      num=num,
+      channels=channels,
+      capabilities=capabilities,
+      vht_capabilities=vht_capabilities,
+  )
 
 
 def get_all_phys(device: 'OpenWrtDevice') -> Sequence[Phy]:
@@ -361,7 +483,7 @@ def get_all_phys(device: 'OpenWrtDevice') -> Sequence[Phy]:
   device.log.debug('Parsing the tree to structured data types.')
   phys = []
   for node in tree_root.children:
-    phy_match = _PHY_NAME_RE.match(node.text)
+    phy_match = _PHY_NAME_RE.match(node.text)  # pyrefly: ignore[no-matching-overload]
     if phy_match is None:
       raise IwOutputParsingError(
           f'Did not find Wiphy name in node: "{node.text}"'
@@ -428,7 +550,7 @@ def _parse_iw_station_output(output: str) -> Sequence[Station]:
   tree_root = parse_indented_text(output)
   results = []
   for node in tree_root.children:
-    station_title_match = _STATION_TITLE_RE.match(node.text)
+    station_title_match = _STATION_TITLE_RE.match(node.text)  # pyrefly: ignore[no-matching-overload]
     if station_title_match is None:
       raise IwOutputParsingError(
           f'Did not find Station mac address in node: "{node.text}"'
@@ -493,12 +615,139 @@ def get_station_info(
   return stations[0]
 
 
+def _int_or_none(value: str | None) -> int | None:
+  """Converts a string to an int or returns None if the string is None."""
+  return int(value) if value is not None else None
+
+
+_INTERFACE_BLOCK_RE = re.compile(
+    r'^\s+Interface\s+(?P<name>\S+)'  # Match Interface header and capture name
+    r'(?P<body>.*?)'  # Capture the rest of the body...
+    r'(?=^\s+Interface|\Z)',  # ...until next Interface or End of String
+    re.MULTILINE | re.DOTALL,
+)
+
+_FIELD_IFINDEX_RE = re.compile(r'^\s+ifindex\s+(?P<val>\d+)', re.MULTILINE)
+_FIELD_ADDR_RE = re.compile(r'^\s+addr\s+(?P<val>[\da-fA-F:]+)', re.MULTILINE)
+_FIELD_SSID_RE = re.compile(r'^\s+ssid\s+(?P<val>.+)', re.MULTILINE)
+_FIELD_TYPE_RE = re.compile(r'^\s+type\s+(?P<val>\w+)', re.MULTILINE)
+
+# Regex to parse the main channel line if it exists
+_CHANNEL_CONFIG_RE = re.compile(
+    r'\s+channel\s+(?P<channel>\d+)\s+\((?P<freq>\d+)\s+MHz\),\s+'
+    r'width:\s+(?P<width>\d+(\+\d+)?\s+MHz(\s\(no\sHT\))?),'
+    r'\s+center1:\s+(?P<center1>\d+)\s+MHz'
+    r'(?:,\s+center2:\s+(?P<center2>\d+)\s+MHz)?',
+    re.MULTILINE,
+)
+
+_MLD_LINK_RE = re.compile(
+    r'^\s+-\s+link\s+ID\s+(?P<link_id>\d+)\s+'
+    r'link\s+addr\s+(?P<link_addr>[\da-fA-F:]+)\n' + _CHANNEL_CONFIG_RE.pattern,
+    re.MULTILINE | re.VERBOSE,
+)
+
+_IW_DEV_PHY_HEADER_RE = re.compile(
+    r'^phy#(?P<phyindex>\d+)\n(?P<phytext>(\s+.+\n)+)', re.MULTILINE
+)
+
+
+def _parse_mld_links(interface_text: str) -> Sequence[MLDLink] | None:
+  """Parses the MLD links from the interface text."""
+
+  if _IW_MLD_WITH_LINKS not in interface_text:
+    return None
+
+  mld_links = tuple(
+      MLDLink(
+          link_id=int(mld_match.group('link_id')),
+          link_addr=mld_match.group('link_addr'),
+          channel=_int_or_none(mld_match.group('channel')),
+          freq=_int_or_none(mld_match.group('freq')),
+          width=ChannelWidth.from_str(mld_match.group('width')),
+          center1=_int_or_none(mld_match.group('center1')),
+          center2=_int_or_none(mld_match.group('center2')),
+      )
+      for mld_match in _MLD_LINK_RE.finditer(interface_text)
+  )
+
+  return mld_links if mld_links else None
+
+
+def _get_chan_data(chan_match: re.Match[str]) -> Mapping[str, Any]:
+  if not chan_match:
+    return {}
+
+  return {
+      'channel': _int_or_none(chan_match.group('channel')),
+      'freq': _int_or_none(chan_match.group('freq')),
+      'width': ChannelWidth.from_str(chan_match.group('width')),
+      'center1': _int_or_none(chan_match.group('center1')),
+      'center2': _int_or_none(chan_match.group('center2')),
+  }
+
+
+def parse_iw_dev_output(output: str) -> Sequence[Interface]:
+  """Parses iw dev output into Interface objects."""
+
+  if not output.endswith('\n'):
+    output += '\n'
+
+  interfaces = []
+
+  for phy_match in _IW_DEV_PHY_HEADER_RE.finditer(output):
+    phy_index = int(phy_match.group('phyindex'))
+    phy_text = phy_match.group('phytext')
+
+    for iface_match in _INTERFACE_BLOCK_RE.finditer(phy_text):
+      name = iface_match.group('name')
+      body = iface_match.group('body')
+
+      def get_val(
+          regex: re.Pattern[str],
+          text: str,
+          type_conv: Callable[[str], Any] = str,
+      ) -> Any | None:
+        m = regex.search(text)
+        return type_conv(m.group('val')) if m else None
+
+      if _IW_MLD_WITH_LINKS in body:
+        main_config_text, mld_part = body.split(_IW_MLD_WITH_LINKS, 1)
+        mld_config_text = _IW_MLD_WITH_LINKS + mld_part
+      else:
+        main_config_text = body
+        mld_config_text = ''
+
+      chan_match = _CHANNEL_CONFIG_RE.search(main_config_text)
+      chan_data = _get_chan_data(chan_match)  # pyrefly: ignore[bad-argument-type]
+
+      mld_links = _parse_mld_links(mld_config_text)
+
+      raw_ssid = get_val(_FIELD_SSID_RE, body)
+      interface = Interface(
+          name=name,
+          phyindex=phy_index,
+          ifindex=get_val(_FIELD_IFINDEX_RE, body, int),  # pyrefly: ignore[bad-argument-type]
+          addr=get_val(_FIELD_ADDR_RE, body),  # pyrefly: ignore[bad-argument-type]
+          type=Type(get_val(_FIELD_TYPE_RE, body)),
+          ssid=ssid_lib.decode_printf_ssid(raw_ssid),
+          # Unpack channel data if it exists, else None
+          channel=chan_data.get('channel'),
+          freq=chan_data.get('freq'),
+          width=chan_data.get('width'),
+          center1=chan_data.get('center1'),
+          center2=chan_data.get('center2'),
+          mld_links=mld_links,
+      )
+      interfaces.append(interface)
+
+  return interfaces
+
+
 def get_all_interfaces(device: 'OpenWrtDevice') -> Sequence[Interface]:
   """Gets all interfaces on the given AP device."""
   output = device.ssh.execute_command(
       command=constants.Commands.IW_DEV,
       timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
   )
-  return [
-      Interface(**match.groupdict()) for match in _IW_DEV_RE.finditer(output)
-  ]
+  return parse_iw_dev_output(output)

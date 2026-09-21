@@ -14,21 +14,52 @@
 
 """Utilities for the AP controller module."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
+import dataclasses
 import datetime
-import logging
+import ipaddress
 import string
 import time
 from typing import Any
 
 from mobly import utils
-from packaging import version
 
-from mobly.controllers.wifi.lib import constants
+from mobly.controllers.wifi.lib import errors
+from mobly.controllers.wifi.lib import iw_utils
+from mobly.controllers.wifi.utils import ip_utils
 
+# Avoid directly importing OpenWrtDevice, which causes circular dependencies.
 OpenWrtDevice = Any
 
-_OPENWRT_NEW_FIREWALL_RULE_VERSION = version.Version('22.03')
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class IpInterface:
+  """IP Interface class for OpenWrt device.
+
+  Attributes:
+    id: The interface id.
+    name: The interface name.
+    type: The interface type.
+    mac_address: The MAC address of the interface.
+    state: The state of the interface.
+    virtual_of: The interface that this interface is virtual of.
+    bridge: The bridge of the interface.
+    ip: The IPv4 address of the interface.
+    subnet: The IPv4 subnet of the interface.
+    iw_interface: The interface information from `iw dev` command if this
+      interface is a wireless interface.
+  """
+
+  id: int
+  name: str
+  type: str
+  mac_address: str
+  state: str
+  virtual_of: str | None = None
+  bridge: str | None = None
+  ip: ipaddress.IPv4Address | None = None
+  subnet: ipaddress.IPv4Network | None = None
+  iw_interface: iw_utils.Interface | None = None
 
 
 def is_hex_string(s: str) -> bool:
@@ -61,39 +92,6 @@ def wait_for_predicate(
     if interval is not None:
       time.sleep(interval.total_seconds())
   return False
-
-
-def is_new_firewall_rule_version(version_number: str) -> bool:
-  """Returns True if OpenWrt version is new firewall rule, False otherwise."""
-  # The version number will be 'SNAPSHOT' for the latest development images.
-  if version_number == constants.VERSION_SNAPSHOT:
-    return True
-  try:
-    parsed_version = version.Version(version_number)
-    return parsed_version >= _OPENWRT_NEW_FIREWALL_RULE_VERSION
-  except version.InvalidVersion:
-    # This should not happen.
-    logging.warning(
-        'Got unknown version number string "%s", assuming it is using the'
-        'latest firewall management tools.',
-        version_number,
-    )
-    return True
-
-
-def is_using_openwrt_snapshot_image(release: str) -> bool:
-  """Returns True if the image is built against SNAPSHOT, False otherwise."""
-  return release == constants.VERSION_SNAPSHOT
-
-
-def is_using_custom_image(device: 'OpenWrtDevice') -> bool:
-  """Returns True if the image is using a custom image, False otherwise."""
-  output = device.ssh.execute_command(
-      command=f'ls {constants.CURSTOM_RELEASE_INFO_FILE_PATH}',
-      timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
-      ignore_error=True,
-  )
-  return output.strip() == constants.CURSTOM_RELEASE_INFO_FILE_PATH
 
 
 def run_command(
@@ -141,3 +139,116 @@ def convert_testbed_bool_value(value: bool | str) -> bool:
     if value.lower() == 'false':
       return False
   raise ValueError(f'Invalid bool value from testbed: {value}')
+
+
+def get_interface_ip_iw_map(
+    device: OpenWrtDevice,
+) -> Mapping[str, IpInterface]:
+  """Gets all interfaces and their information.
+
+  This method also correlates the information from `iw dev` command with the
+  information from `ip addr show` command to get the wireless interface
+  information on matched interface names.
+
+  If an interface does not have an IP address but is part of a bridge, it
+  inherits the IP address and subnet from its bridge interface.
+
+  Args:
+    device: The OpenWrtDevice instance.
+
+  Returns:
+    A mapping of interface name to interface information.
+  """
+  interfaces: Sequence[ip_utils.IpAddrInterface] = (
+      ip_utils.get_all_ip_addr_interfaces(device)
+  )
+  iw_interfaces = iw_utils.get_all_interfaces(device)
+  iw_interfaces_map = {interface.name: interface for interface in iw_interfaces}
+  # IP address is in the format of `ip_addr/mask_len`.
+  parse_ipv4_addr = (
+      lambda ip_addr: ipaddress.IPv4Address(ip_addr.split('/')[0])
+      if ip_addr is not None
+      else None
+  )
+
+  parse_subnet_addr = (
+      lambda subnet_addr: ipaddress.IPv4Network(subnet_addr, strict=False)
+      if subnet_addr is not None
+      else None
+  )
+
+  pre_interfaces = {
+      intf.name: IpInterface(
+          id=intf.id,
+          name=intf.name,
+          type=intf.link_type,  # pyrefly: ignore[bad-argument-type]
+          mac_address=intf.mac_address,  # pyrefly: ignore[bad-argument-type]
+          state=intf.state,  # pyrefly: ignore[bad-argument-type]
+          virtual_of=intf.virtual_of,
+          bridge=intf.bridge,
+          ip=parse_ipv4_addr(intf.ipv4_address),
+          subnet=parse_subnet_addr(intf.ipv4_address),
+          iw_interface=iw_interfaces_map.get(intf.name),
+      )
+      for intf in interfaces
+  }
+
+  final_interfaces = {}
+  for name, intf in pre_interfaces.items():
+    ip = intf.ip
+    subnet = intf.subnet
+    if ip is None and intf.bridge is not None:
+      bridge_intf = pre_interfaces.get(intf.bridge)
+      if bridge_intf:
+        ip = bridge_intf.ip
+        subnet = bridge_intf.subnet
+    final_interfaces[name] = dataclasses.replace(intf, ip=ip, subnet=subnet)
+
+  return final_interfaces
+
+
+def get_ap_ip_and_subnet(
+    device: OpenWrtDevice,
+    ssid: str,
+    mac_address: str | None = None,
+) -> tuple[ipaddress.IPv4Address, ipaddress.IPv4Network]:
+  """Gets the AP's IP address and subnet of the given SSID.
+
+  Args:
+    device: The OpenWrtDevice instance.
+    ssid: The target SSID of the AP to get the IP and subnet from.
+    mac_address: The mac address of the AP to get the IP and subnet. This
+      argument is used to distinguish between multiple non-bridged APs with the
+      same SSID.
+
+  Returns:
+    A tuple of the AP's IP address and subnet of the given SSID.
+
+  Raises:
+    errors.BaseError: If the target IP or subnet is not found.
+  """
+  intf_ip_iw_map = get_interface_ip_iw_map(device)
+
+  def is_interface_matched(intf: IpInterface) -> bool:
+    iw = intf.iw_interface
+    if iw is None or iw.ssid is None:
+      return False
+    ssid_matches = iw.ssid == ssid
+    mac_matches = mac_address is None or intf.mac_address == mac_address
+    return ssid_matches and mac_matches
+
+  for intf in intf_ip_iw_map.values():
+    if is_interface_matched(intf):
+      if intf.ip is None:
+        raise errors.BaseError(
+            f'Failed to get target IP for SSID {ssid}, interface {intf}'
+        )
+      if intf.subnet is None:
+        raise errors.BaseError(
+            f'Failed to get subnet for SSID {ssid}, interface {intf}'
+        )
+      return (intf.ip, intf.subnet)
+  raise errors.BaseError(
+      f'Failed to find a matched SSID {ssid} with mac address'
+      f' {mac_address} from broadcasting SSIDs'
+  )

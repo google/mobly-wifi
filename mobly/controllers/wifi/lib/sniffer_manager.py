@@ -14,9 +14,14 @@
 
 """The manager managing packet capture instances on AP devices."""
 
+from __future__ import annotations
+
+from collections.abc import Sequence
+import datetime
 import os
 import signal
-from typing import Any
+import time
+from typing import Any, Protocol
 
 from mobly import logger as mobly_logger
 from mobly import runtime_test_info
@@ -28,6 +33,7 @@ from mobly.controllers.wifi.lib import errors
 from mobly.controllers.wifi.lib import iw_utils
 from mobly.controllers.wifi.lib import sniffer_manager_base
 from mobly.controllers.wifi.lib import wifi_configs
+
 
 # Avoid directly importing cros_device, which causes circular dependencies.
 OpenWrtDevice = Any
@@ -53,9 +59,83 @@ _KEEP_LATEST_PCAP_ARG = f'-W {_KEEP_PCAP_FILE_NUM} -C {_PCAP_FILE_SIZE_MB}'
 # `tcpdump` filter to ignore QoS data frames.
 _FILTER_IGNORE_QOS_DATA_FRAMES = r'not \(type data subtype qos-data\)'
 
+_TCPDUMP_READY_MESSAGE = b'listening on'
+_TCPDUMP_POLL_INTERVAL_SEC = 0.1
+
+
+class SnifferManagerProtocol(Protocol):
+  """A protocol for sniffer managers."""
+
+  @property
+  def is_alive(self) -> bool:
+    """True if the service is alive; False otherwise."""
+
+  def start_packet_capture_with_network_config(
+      self,
+      network_config: wifi_configs.NetworkConfig,
+      capture_config: wifi_configs.PcapConfig | None = None,
+  ) -> None:
+    """Starts packet capture for all wifi configs in the network config.
+
+    Args:
+      network_config: The network configuration containing WiFi configs.
+      capture_config: The configuration for packet capturing.
+    """
+    ...
+
+  def start_packet_capture_with_wifi_config(
+      self,
+      wifi_config: wifi_configs.WiFiConfig,
+      capture_config: wifi_configs.PcapConfig | None = None,
+  ) -> None:
+    """Starts packet capture on the WiFi network.
+
+    Args:
+      wifi_config: The WiFi configuration for which to start capture.
+      capture_config: The configuration for packet capturing.
+    """
+    ...
+
+  def start_capture(
+      self,
+      freq_config: wifi_configs.FreqConfig,
+      capture_config: wifi_configs.PcapConfig,
+  ) -> None:
+    """Starts the sniffer process.
+
+    Args:
+      freq_config: The frequency configuration for which to start capture.
+      capture_config: The configuration for packet capturing.
+    """
+    ...
+
+  def stop_capture(
+      self,
+      current_test_info: runtime_test_info.RuntimeTestInfo | None = None,
+      band_type: wifi_configs.BandType | None = None,
+  ):
+    """Stops the sniffer process.
+
+    Args:
+      current_test_info: If provided, this will move the captured packets to
+        `current_test_info.output_path`. Otherwise the captured packets will be
+        removed.
+      band_type: The band on which to stop packet capture.
+    """
+    ...
+
+  def get_capture_files(self) -> Sequence[str] | None:
+    """Gets the full path of the capture files."""
+    ...
+
+  def teardown(self):
+    """Tears the sniffer manager object down."""
+    ...
+
 
 class SnifferManager:
   """The class for managing sniffer instances on the AP device."""
+
   # Map from band type to a tuple of (capture_file_remote_path, remote_process)
   remote_processes: dict[wifi_configs.BandType, tuple[str, ssh_lib.RemotePopen]]
 
@@ -104,12 +184,49 @@ class SnifferManager:
     self._device.ssh.make_dirs(remote_dir)
     return remote_dir
 
+  def start_packet_capture_with_network_config(
+      self,
+      network_config: wifi_configs.NetworkConfig,
+      capture_config: wifi_configs.PcapConfig | None = None,
+  ) -> None:
+    """Starts packet capture on the WiFi network.
+
+    Args:
+      network_config: The network configuration containing WiFi configs.
+      capture_config: The configuration for packet capturing.
+    """
+    if network_config.mlo_config is not None:
+      raise errors.ConfigError('mlo_config is not supported yet.')
+    for wifi_config in network_config.wifi_configs:
+      self.start_packet_capture_with_wifi_config(
+          wifi_config=wifi_config, capture_config=capture_config
+      )
+
+  def start_packet_capture_with_wifi_config(
+      self,
+      wifi_config: wifi_configs.WiFiConfig,
+      capture_config: wifi_configs.PcapConfig | None = None,
+  ) -> None:
+    """Starts packet capture on the WiFi network.
+
+    Args:
+      wifi_config: The WiFi configuration for which to start capture.
+      capture_config: The configuration for packet capturing.
+    """
+    freq_config = wifi_configs.get_freq_config(wifi_config)
+    self.start_capture(freq_config=freq_config, capture_config=capture_config)
+
   def start_capture(
       self,
       freq_config: wifi_configs.FreqConfig,
       capture_config: wifi_configs.PcapConfig | None = None,
   ) -> None:
-    """Starts pacaket capture on the given channel."""
+    """Starts packet capture on the given channel.
+
+    Args:
+      freq_config: The frequency configuration for which to start capture.
+      capture_config: The configuration for packet capturing.
+    """
     capture_config = capture_config or wifi_configs.PcapConfig()
     self._log.debug(
         'Starting packet capture on frequency conf: %s, capture conf: %s',
@@ -136,6 +253,56 @@ class SnifferManager:
           'Running multiple sniffer instances on the same band is not allowed.'
       )
 
+  def _wait_for_tcpdump_ready(
+      self,
+      proc: ssh_lib.RemotePopen,
+      *,
+      timeout: datetime.timedelta = datetime.timedelta(seconds=15),
+  ) -> None:
+    """Waits for tcpdump to be ready by checking for "listening on" in stdout.
+
+    With get_pty=True, stderr is merged into stdout.
+
+    Args:
+      proc: The remote process object for tcpdump.
+      timeout: The maximum time to wait for tcpdump to become ready.
+
+    Raises:
+      errors.SnifferManagerError: If tcpdump exits prematurely or times out
+        before printing "listening on".
+    """
+    timeout_sec = timeout.total_seconds()
+    self._log.debug(
+        'Waiting for %r in stdout for %fs...',
+        _TCPDUMP_READY_MESSAGE,
+        timeout_sec,
+    )
+    end_time = time.perf_counter() + timeout_sec
+    stdout_buffer = bytearray()
+    while time.perf_counter() < end_time:
+      if proc.recv_ready():
+        chunk = proc.recv(4096)
+        stdout_buffer.extend(chunk)
+        if _TCPDUMP_READY_MESSAGE in stdout_buffer:
+          self._log.debug('Found %r in stdout.', _TCPDUMP_READY_MESSAGE)
+          return
+      elif proc.poll() is not None:
+        self._log.warning(
+            'Remote process exited before finding %r in stdout.',
+            _TCPDUMP_READY_MESSAGE,
+        )
+        raise errors.SnifferManagerError(
+            'tcpdump process exited prematurely without'
+            f' {_TCPDUMP_READY_MESSAGE!r} message. Stdout:'
+            f' {stdout_buffer.decode(errors="ignore")!r}'
+        )
+      time.sleep(_TCPDUMP_POLL_INTERVAL_SEC)
+    raise errors.SnifferManagerError(
+        f'Timed out waiting for {_TCPDUMP_READY_MESSAGE!r} in tcpdump stdout'
+        f' after {timeout_sec}s. Stdout:'
+        f' {stdout_buffer.decode(errors="ignore")!r}'
+    )
+
   def _start_remote_process(
       self,
       interface: str,
@@ -146,7 +313,10 @@ class SnifferManager:
     channel = freq_config.channel
 
     phys = iw_utils.get_all_phys(device=self._device)
-    phy = iw_utils.get_phy_by_channel(phys, channel).name
+    phy = iw_utils.get_phy_by_channel(phys, channel)
+
+    freq_config.complete_from_phy(phy)
+    phy_name = phy.name
 
     # Don't kill all existing tcpdump instances or remove the PCAP directory
     # since packet capture might already be running on a different band.
@@ -157,7 +327,7 @@ class SnifferManager:
     )
     self._device.ssh.execute_command(
         command=constants.Commands.IW_DEV_ADD_MONITOR.format(
-            phy=phy, interface=interface
+            phy=phy_name, interface=interface
         ),
         timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
     )
@@ -189,6 +359,20 @@ class SnifferManager:
         ),
         get_pty=True,
     )
+
+    try:
+      self._wait_for_tcpdump_ready(remote_process)
+    except errors.SnifferManagerError:
+      self._log.error(
+          'Failed to start tcpdump on interface %s, cleaning up process.',
+          interface,
+      )
+      self._stop_remote_process(
+          band_type=freq_config.band_type,
+          proc=remote_process,
+      )
+      raise
+
     self._remote_processes[freq_config.band_type] = (
         capture_file_remote_path,
         remote_process,
@@ -217,14 +401,21 @@ class SnifferManager:
       current_test_info: runtime_test_info.RuntimeTestInfo | None = None,
       band_type: wifi_configs.BandType | None = None,
   ):
-    """Stops packet capture on the band specified, or all bands if no band is specified.
+    """Stops packet capture processes.
+
+    Stops packet capture on the band specified, or all bands if no band is
+    specified.
 
     Args:
-      current_test_info: The current test info.
+      current_test_info: If provided, this will move the captured packets to
+        `current_test_info.output_path`. Otherwise the captured packets will be
+        removed.
       band_type: The band on which to stop packet capture.
 
-    If mergecap is enabled, the packet captures will be merged to a single file.
+      If mergecap is enabled, the packet captures will be merged to a single
+      file.
     """
+
     if not self.is_alive:
       self._log.warning(
           'Skip stopping this sniffer manager because it is not running.'
@@ -323,9 +514,7 @@ class SnifferManager:
         self._device.ssh.pull_to_directory(
             os.path.join(self._remote_work_dir, pcap_file), local_dir
         )
-        self._device.ssh.rm_file(
-            os.path.join(self._remote_work_dir, pcap_file)
-        )
+        self._device.ssh.rm_file(os.path.join(self._remote_work_dir, pcap_file))
         pcap_local_paths.append(os.path.join(local_dir, pcap_file))
     if not pcap_local_paths:
       self._log.warning('No packet capture files pulled to local directory.')
@@ -368,9 +557,19 @@ class SnifferManager:
       os.remove(pcap_local_path)
     return new_file_path
 
-  def get_capture_file(self) -> str | None:
-    """Gets the full path of the last capture."""
-    return self._capture_file_local_path
+  def get_capture_files(self) -> Sequence[str] | None:
+    """Gets the full path of the capture files.
+
+    Returns:
+      The full local path to the captured PCAP file, or None if no file was
+      captured. If multiple files were captured and mergecap is available,
+      this will be the path to the merged file.
+    """
+    return (
+        [self._capture_file_local_path]
+        if self._capture_file_local_path
+        else None
+    )
 
   def teardown(self):
     """Tears down this manager object."""

@@ -14,14 +14,16 @@
 
 """Mobly controller module for AP devices running on the OpenWrt system."""
 
+from __future__ import annotations
+
 from collections.abc import Iterator, Mapping, Sequence
 import contextlib
-import dataclasses
 import datetime
-import ipaddress
 import itertools
 import logging
 import os
+import pathlib
+import tempfile
 import time
 import traceback
 from typing import Any
@@ -33,17 +35,19 @@ from mobly.controllers.android_device_lib import service_manager
 import paramiko
 
 from mobly.controllers.wifi.lib import ssh as ssh_lib
+from mobly.controllers.wifi import openwrt_device_config
+from mobly.controllers.wifi.lib import captive_portal_server
 from mobly.controllers.wifi.lib import constants
-from mobly.controllers.wifi.lib import device_info_utils
+from mobly.controllers.wifi.lib import device_info as device_info_lib
 from mobly.controllers.wifi.lib import hostapd_manager
 from mobly.controllers.wifi.lib import iw_utils
+from mobly.controllers.wifi.lib import package_manager
 from mobly.controllers.wifi.lib import sniffer_manager
 from mobly.controllers.wifi.lib import utils as wifi_utils
 from mobly.controllers.wifi.lib import wifi_configs
 from mobly.controllers.wifi.lib import wifi_manager
+from mobly.controllers.wifi.lib.encryption import certificate
 from mobly.controllers.wifi.lib.services import system_log_service
-from mobly.controllers.wifi.utils import ip_utils
-
 
 MOBLY_CONTROLLER_CONFIG_NAME = 'OpenWrtDevice'
 
@@ -51,13 +55,6 @@ _SSH_KEY_IDENTITY = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'data/testing_rsa'
 )
 _SSH_PORT = 22
-_DEVICE_TAG = MOBLY_CONTROLLER_CONFIG_NAME
-
-_DEVICE_REBOOT_WAIT = datetime.timedelta(seconds=10)
-_BOOT_STATUS_CHECK_INTERVAL = datetime.timedelta(seconds=5)
-_BOOT_STATUS_CHECK_TIMEOUT = datetime.timedelta(minutes=5)
-_SSH_CONNECTION_TIMEOUT = datetime.timedelta(minutes=5)
-
 
 _ERR_USE_AS_BOTH_AP_AND_SNIFFER = (
     "{device} It's not supported to use one OpenWrt device as both AP and"
@@ -65,7 +62,8 @@ _ERR_USE_AS_BOTH_AP_AND_SNIFFER = (
 )
 
 _ERR_START_PACKET_CAPTURE_ARG_ERROR = (
-    '{device} Exactly one of wifi_config and freq_config must be provided.'
+    '{device} Exactly one of wifi_config, network_config, or freq_config must'
+    ' be provided.'
 )
 
 
@@ -73,16 +71,21 @@ class Error(Exception):
   """Error class for the OpenWrtDevice controller."""
 
 
-def create(configs: list[dict[str, Any]]) -> list['OpenWrtDevice']:
+def create(configs: list[dict[str, Any]]) -> list[OpenWrtDevice]:
   """Creates OpenWrt device instances."""
   if not configs:
     raise Error(f'Missing configuration {configs!r}.')
-  devices = [OpenWrtDevice(config) for config in configs]
+  try:
+    device_configs = openwrt_device_config.from_dicts(configs)
+  except Exception as e:
+    raise Error(f'Failed to parse device configs: {e}') from e
+
+  devices = [OpenWrtDevice(config) for config in device_configs]
   devices = _initialize_devices(devices)
   return devices
 
 
-def destroy(devices: list['OpenWrtDevice']) -> None:
+def destroy(devices: list[OpenWrtDevice]) -> None:
   """Closes all created OpenWrt device instances."""
   for device in devices:
     try:
@@ -91,7 +94,7 @@ def destroy(devices: list['OpenWrtDevice']) -> None:
       logging.exception('Failed to clean up properly.')
 
 
-def get_info(devices: Sequence['OpenWrtDevice']) -> Sequence[Mapping[str, Any]]:
+def get_info(devices: Sequence[OpenWrtDevice]) -> Sequence[Mapping[str, Any]]:
   """Gets info from the OpenWrt device instances used in a test run.
 
   Args:
@@ -100,12 +103,12 @@ def get_info(devices: Sequence['OpenWrtDevice']) -> Sequence[Mapping[str, Any]]:
   Returns:
     A list of dict, each representing info for a device object.
   """
-  return [d.device_info for d in devices]
+  return [d.device_info.to_dict() for d in devices]
 
 
 def _initialize_devices(
-    devices: Sequence['OpenWrtDevice'],
-) -> list['OpenWrtDevice']:
+    devices: Sequence[OpenWrtDevice],
+) -> list[OpenWrtDevice]:
   """Registers basic long running services on multiple OpenWrtDevice objects.
 
   Args:
@@ -126,39 +129,14 @@ def _initialize_devices(
   return initialized_devices
 
 
-@dataclasses.dataclass(frozen=True, kw_only=True)
-class IpInterface:
-  """IP Interface class for OpenWrt device.
-
-  Attributes:
-    id: The interface id.
-    name: The interface name.
-    type: The interface type.
-    mac_address: The MAC address of the interface.
-    state: The state of the interface.
-    virtual_of: The interface that this interface is virtual of.
-    bridge: The bridge of the interface.
-    ip: The IPv4 address of the interface.
-    subnet: The IPv4 subnet of the interface.
-    iw_interface: The interface information from `iw dev` command if this
-      interface is a wireless interface.
-  """
-  id: int
-  name: str
-  type: str
-  mac_address: str
-  state: str
-  virtual_of: str | None = None
-  bridge: str | None = None
-  ip: ipaddress.IPv4Address | None = None
-  subnet: ipaddress.IPv4Network | None = None
-  iw_interface: iw_utils.Interface | None = None
+IpInterface = wifi_utils.IpInterface
 
 
 class OpenWrtDevice:
   """Mobly controller for AP devices running on the OpenWrt system.
 
   Attributes:
+    config: The configuration of the OpenWrt device.
     ssh: The underlying SSH client object.
     serial: A string that identifies the ChromeOS device.
     log_path: A string that is the path where all logs collected on this device
@@ -171,30 +149,33 @@ class OpenWrtDevice:
     wifi_id_counter: The id counter of WiFi networks.
   """
 
-  def __init__(self, config: dict[str, Any]):
-    if 'hostname' not in config:
-      raise Error(
-          'Missing required field "hostname" in device configuration'
-          f' {config!r}.'
-      )
-    self._hostname = config['hostname']
-    self._username = config.get('username', constants.SSH_USERNAME)
-    self._password = config.get('password', None)
-    self._ssh_port = config.get('ssh_port', _SSH_PORT)
-    self._skip_init_reboot = wifi_utils.convert_testbed_bool_value(
-        config.get('skip_init_reboot', False)
-    )
-    self._skip_init_package_installation = (
-        wifi_utils.convert_testbed_bool_value(
-            config.get('skip_init_package_installation', False)
-        )
-    )
-    self.serial = f'{self._hostname}:{self._ssh_port}'
+  _DEVICE_TAG = MOBLY_CONTROLLER_CONFIG_NAME
+  _DEVICE_REBOOT_WAIT = datetime.timedelta(seconds=10)
+  _BOOT_STATUS_CHECK_INTERVAL = datetime.timedelta(seconds=5)
+  _BOOT_STATUS_CHECK_TIMEOUT = datetime.timedelta(minutes=5)
+  _SSH_CONNECTION_TIMEOUT = datetime.timedelta(minutes=5)
+
+  _wifi_manager: wifi_manager.WifiManagerProtocol
+  _sniffer_manager: sniffer_manager.SnifferManagerProtocol | None = None
+  _package_manager: package_manager.PackageManagerProtocol
+  _captive_portal_server: (
+      captive_portal_server.CaptivePortalServerProtocol | None
+  )
+
+  def __init__(
+      self, config: openwrt_device_config.DeviceConfig | Mapping[str, Any]
+  ):
+    # If the config is not a DeviceConfig object, convert it to one. This is
+    # to support the old way of passing configs as dicts for backward
+    # compatibility.
+    if not isinstance(config, openwrt_device_config.DeviceConfig):
+      config = openwrt_device_config.DeviceConfig.from_dict(dict(config))
+    self.config = config
     self._device_info = None
 
     log_path = getattr(logging, 'log_path', '/tmp/logs')
     log_filename = mobly_logger.sanitize_filename(
-        f'{_DEVICE_TAG}_{self.serial}'
+        f'{self._DEVICE_TAG}_{self.serial}'
     )
     self.log_path = os.path.join(log_path, log_filename)
     utils.create_dir(self.log_path)
@@ -203,7 +184,7 @@ class OpenWrtDevice:
         logging.getLogger(),
         {
             mobly_logger.PrefixLoggerAdapter.EXTRA_KEY_LOG_PREFIX: (
-                f'[{_DEVICE_TAG}|{self.serial}]'
+                f'[{self._log_prefix}]'
             )
         },
     )
@@ -211,30 +192,134 @@ class OpenWrtDevice:
     self._remote_work_dir = None
     self._wifi_id_counter = itertools.count(0)
     self._last_reboot_error = None
+    self._wan_interface = None
 
     self._ssh = self._create_ssh_client()
-    self._wifi_manager = wifi_manager.WiFiManager(device=self)
+    self._wifi_manager = self._create_wifi_manager()
     self.services = service_manager.ServiceManager(device=self)
-    self._sniffer_manager = sniffer_manager.SnifferManager(device=self)
+    self._package_manager = self._create_package_manager()
+    self._sniffer_manager = None
+    self._captive_portal_server = None
+    self._is_torn_down = False
+
+  @property
+  def _log_prefix(self) -> str:
+    return f'{self._DEVICE_TAG}|{self.serial}'
+
+  @property
+  def serial(self) -> str:
+    return f'{self._hostname}:{self._ssh_port}'
+
+  @property
+  def _hostname(self) -> str:
+    return self.config.hostname
+
+  @property
+  def _username(self) -> str:
+    return self.config.username
+
+  @property
+  def _password(self) -> str | None:
+    return self.config.password
+
+  @property
+  def _ssh_port(self) -> int:
+    return self.config.ssh_port
+
+  @property
+  def _skip_init_reboot(self) -> bool:
+    return self.config.skip_init_reboot
+
+  @property
+  def _skip_init_package_installation(self) -> bool:
+    return self.config.skip_init_package_installation
+
+  @property
+  def wan_interface(self) -> str:
+    """The WAN uplink interface name."""
+    if self._wan_interface is None:
+      self._wan_interface = self._detect_wan_interface()
+    return self._wan_interface
+
+  def _detect_wan_interface(self) -> str:
+    """Detects the active WAN interface from OpenWrt UCI configuration."""
+    wan_dev = self.ssh.execute_command(
+        command=constants.Commands.GET_WAN_INTERFACE,
+        timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
+        ignore_error=True,
+    )
+    if wan_dev and wan_dev.strip():
+      return wan_dev.strip()
+    return constants.DEFAULT_WAN_INTERFACE
+
+  def _create_wifi_manager(self) -> wifi_manager.WifiManagerProtocol:
+    return wifi_manager.WiFiManager(device=self)
+
+  def _create_package_manager(self) -> package_manager.PackageManagerProtocol:
+    return package_manager.PackageManager(device=self)
 
   def __repr__(self) -> str:
-    return f'<{_DEVICE_TAG}|{self.serial}>'
+    return f'<{self._log_prefix}>'
 
   def _create_ssh_client(self) -> ssh_lib.SSHProxy:
-    if self._password is None:
-      return ssh_lib.SSHProxy(
-          hostname=self._hostname,
-          ssh_port=self._ssh_port,
-          username=self._username,
-          keyfile=_SSH_KEY_IDENTITY,
+    return ssh_lib.SSHProxy(
+        hostname=self._hostname,
+        ssh_port=self._ssh_port,
+        username=self._username,
+        proxy_command=self.config.ssh_proxy_command,
+        keyfile=_SSH_KEY_IDENTITY if self._password is None else None,
+        password=self._password,
+    )
+
+  def start_captive_portal_server(
+      self,
+      use_opennds: bool = False,
+  ) -> None:
+    """Starts the captive portal server on the device.
+
+    Configures captive portal and redirects localhost traffic to
+    http://example.com. Only one captive portal server can be active on the
+    device at a time. When opennds is used, it will be configured and started.
+    Otherwise, the default captive portal server will be used. If a server is
+    already active but with a different configuration (e.g. switching between
+    OpenNDS and default server), it will be stopped first, and a new server of
+    the requested type will be started instead.
+
+    Args:
+      use_opennds: Whether to configure and use opennds for captive portal.
+    """
+    if (
+        self._captive_portal_server is not None
+        and use_opennds != self._captive_portal_server.use_opennds
+    ):
+      self.log.info(
+          'Stopping existing captive portal server to switch configurations.'
       )
-    else:
-      return ssh_lib.SSHProxy(
-          hostname=self._hostname,
-          ssh_port=self._ssh_port,
-          username=self._username,
-          password=self._password,
+      self.stop_captive_portal_server()
+
+    if self._captive_portal_server is None:
+      self._captive_portal_server = captive_portal_server.CaptivePortalServer(
+          device=self, use_opennds=use_opennds
       )
+
+    target_wifi_info = [
+        comp.info for comp in self._wifi_manager.running_wifis.values()
+    ]
+
+    dhcp_lease_file = self._wifi_manager.get_dhcp_lease_file(
+        target_wifi_info[0] if target_wifi_info else None
+    )
+
+    self._captive_portal_server.start_captive_portal_server(
+        wifi_info=target_wifi_info,
+        dhcp_lease_file=dhcp_lease_file,
+    )
+
+  def stop_captive_portal_server(self) -> None:
+    """Stops the captive portal server on the device if one is running."""
+    if self._captive_portal_server is not None:
+      self._captive_portal_server.stop_captive_portal_server()
+      self._captive_portal_server = None
 
   @property
   def wifi_id_counter(self) -> Iterator[int]:
@@ -266,59 +351,23 @@ class OpenWrtDevice:
     """
     os.chmod(_SSH_KEY_IDENTITY, 0o600)
     self._ssh.connect(
-        open_sftp=False, timeout=_SSH_CONNECTION_TIMEOUT.total_seconds()
+        open_sftp=False, timeout=self._SSH_CONNECTION_TIMEOUT.total_seconds()
     )
-
-    packages = self._get_required_packages()
-    for pkg in packages:
-      self._install_package(pkg)
+    if not self._skip_init_package_installation:
+      self._package_manager.install_required_packages()
 
     if self._skip_init_reboot:
       self.log.info('Skipped reboot when initializing this controller object.')
       self._ssh.open_sftp()
       self._wifi_manager.initialize()
-      self._sniffer_manager.initialize()
     else:
+      # Fetch and cache device info before rebooting. This is important because
+      # the reboot check command depends on whether the device is running a
+      # custom image, which is determined during device info initialization.
+      _ = self.device_info
       self.reboot()
 
     self._register_syslog_service()
-
-  def _get_required_packages(self) -> Sequence[str]:
-    """Returns all required OpenWrt packages for this device."""
-    if self._skip_init_package_installation:
-      return tuple()
-
-    if self.device_info.get(
-        'device_name', None
-    ) == constants.ApModel.BPIR3 and wifi_utils.is_using_custom_image(
-        device=self
-    ):
-      return constants.REQUIRED_PACKAGES_BPIR3_AND_CROS_BUILT_IMAGE
-
-    if wifi_utils.is_using_openwrt_snapshot_image(self.device_info['release']):
-      # By default, the controller should not install any packages on a snapshot
-      # image.
-      return tuple()
-
-    return constants.REQUIRED_PACKAGES_RELEASED_IMAGE
-
-  def _install_package(self, package: str):
-    """Installs a package on the device through `opkg`."""
-    result = self.ssh.execute_command(
-        command=constants.Commands.OPKG_LIST.format(package=package),
-        timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
-    )
-    if package in result:
-      self.log.debug('Package %s is already installed.', package)
-      return
-    self.ssh.execute_command(
-        command=constants.Commands.OPKG_UPDATE,
-        timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
-    )
-    self.ssh.execute_command(
-        command=constants.Commands.OPKG_INSTALL.format(package=package),
-        timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
-    )
 
   def reboot(self) -> None:
     """Reboots the device.
@@ -335,7 +384,7 @@ class OpenWrtDevice:
       # Use execute_command_async here to avoid getting stuck in dangling
       # ssh connection during rebooting.
       self.ssh.execute_command_async(command=constants.Commands.REBOOT)
-      time.sleep(_DEVICE_REBOOT_WAIT.total_seconds())
+      time.sleep(self._DEVICE_REBOOT_WAIT.total_seconds())
 
   @contextlib.contextmanager
   def handle_reboot(self) -> Iterator[None]:
@@ -351,13 +400,31 @@ class OpenWrtDevice:
       None
     """
     self._wifi_manager.teardown()
+    if self._sniffer_manager is not None:
+      self._sniffer_manager.teardown()
+      self._sniffer_manager = None
+
+    is_captive_portal_server_running = (
+        self._captive_portal_server is not None
+        and self._captive_portal_server.is_alive
+    )
+    was_using_opennds = False
+    if self._captive_portal_server is not None:
+      was_using_opennds = self._captive_portal_server.use_opennds
+    self.stop_captive_portal_server()
+    live_services = self.services.list_live_services()
+    self.services.stop_all()
+
     try:
       yield
     finally:
+      self._wan_interface = None
       self._ssh.disconnect()
       self._wait_for_boot_completion()
+      self.services.start_services(live_services)
       self._wifi_manager.initialize()
-      self._sniffer_manager.initialize()
+      if is_captive_portal_server_running:
+        self.start_captive_portal_server(use_opennds=was_using_opennds)
 
   def _wait_for_boot_completion(self) -> None:
     """Waits for a ssh connection can be reestablished.
@@ -368,12 +435,12 @@ class OpenWrtDevice:
     self._last_reboot_error = None
     if not wifi_utils.wait_for_predicate(
         predicate=self._is_reboot_ready,
-        timeout=_BOOT_STATUS_CHECK_TIMEOUT,
-        interval=_BOOT_STATUS_CHECK_INTERVAL,
+        timeout=self._BOOT_STATUS_CHECK_TIMEOUT,
+        interval=self._BOOT_STATUS_CHECK_INTERVAL,
     ):
       message = (
           f'{repr(self)} Booting process timed out after'
-          f' {_BOOT_STATUS_CHECK_TIMEOUT.total_seconds()} seconds.'
+          f' {self._BOOT_STATUS_CHECK_TIMEOUT.total_seconds()} seconds.'
       )
       if self._last_reboot_error is not None:
         error_traceback = '\n'.join(
@@ -386,15 +453,22 @@ class OpenWrtDevice:
     """Connects to the device through ssh with sftp enabled."""
     self._ssh.connect(
         open_sftp=True,
-        timeout=_SSH_CONNECTION_TIMEOUT.total_seconds(),
+        timeout=self._SSH_CONNECTION_TIMEOUT.total_seconds(),
     )
+
+  @property
+  def _reboot_check_command(self) -> str:
+    """Returns the command to check if the device is ready after reboot."""
+    if self.device_info.is_cros_image:
+      return constants.Commands.CHECK_DEVICE_REBOOT_READY_CUSTOM_IMAGE
+    return constants.Commands.CHECK_DEVICE_REBOOT_READY
 
   def _is_reboot_ready(self) -> bool:
     """Returns whether the device is ready after reboot."""
     try:
       self.ssh_connect()
       self._ssh.execute_command(
-          constants.Commands.CHECK_DEVICE_REBOOT_READY,
+          self._reboot_check_command,
           timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
           ignore_error=False,
       )
@@ -424,16 +498,11 @@ class OpenWrtDevice:
           ' collected for this device.'
       )
 
-  def __del__(self):
-    self.teardown()
-
   @property
-  def device_info(self) -> Mapping[str, str]:
+  def device_info(self) -> device_info_lib.DeviceInfo:
     """Information to be pulled into controller info in the test summary."""
     if self._device_info is None:
-      self._device_info = device_info_utils.get_device_info(device=self) | {
-          'serial': self.serial
-      }
+      self._device_info = device_info_lib.DeviceInfo.from_device(self)
     return self._device_info
 
   @property
@@ -469,10 +538,33 @@ class OpenWrtDevice:
     """
     self.ssh.push(local_src_filename, remote_dest_filename, change_permission)
 
+  def remove_file(self, remote_path: str, ignore_error: bool = False) -> None:
+    """Removes a file from the remote machine.
+
+    Args:
+      remote_path: The path to the file on the remote machine.
+      ignore_error: Whether to ignore errors if command fails.
+    """
+    try:
+      self.ssh.rm_file(remote_path)
+    except Exception as e:  # pylint: disable=broad-except
+      if not ignore_error:
+        raise
+      self.log.debug('Failed to remove file %s: %s', remote_path, e)
+
+  def start_wifi_with_network_config(
+      self, config: wifi_configs.NetworkConfig
+  ) -> Sequence[wifi_configs.WifiInfo]:
+    """Starts a WiFi networks with the given network configurations."""
+    if self._sniffer_manager is not None and self._sniffer_manager.is_alive:
+      raise Error(_ERR_USE_AS_BOTH_AP_AND_SNIFFER.format(device=self))
+
+    return self._wifi_manager.start_wifi_with_network_config(config)
+
   def start_wifi(
       self, config: wifi_configs.WiFiConfig
   ) -> wifi_configs.WifiInfo:
-    if self._sniffer_manager.is_alive:
+    if self._sniffer_manager is not None and self._sniffer_manager.is_alive:
       raise Error(_ERR_USE_AS_BOTH_AP_AND_SNIFFER.format(device=self))
     return self._wifi_manager.start_wifi(config)
 
@@ -517,7 +609,7 @@ class OpenWrtDevice:
       value: The value of the property to set.
     """
     self._wifi_manager.set_hostapd_property(
-        wifi_info, property_name, value
+        wifi_info, property_name=property_name, value=value
     )
 
   def channel_switch(
@@ -526,7 +618,7 @@ class OpenWrtDevice:
       target_channel: int,
       beacon_count: int = 1,
       optional_args: Sequence[str] | None = None,
-  ) -> None:
+  ) -> wifi_configs.WifiInfo | None:
     """Performs a channel switch from the current channel to the target channel.
 
     Args:
@@ -536,10 +628,36 @@ class OpenWrtDevice:
       beacon_count: The number of beacons to send before switching channels.
       optional_args: Optional arguments to pass to the hostapd_cli chan-switch
         command.
+
+    Returns:
+      The updated `WifiInfo` with the new channel and frequency.
     """
-    self._wifi_manager.channel_switch(
-        wifi_info, target_channel, beacon_count, optional_args
+    return self._wifi_manager.channel_switch(
+        wifi_info,
+        target_channel=target_channel,
+        beacon_count=beacon_count,
+        optional_args=optional_args,
     )
+
+  def turn_off_radio(self, wifi_info: wifi_configs.WifiInfo) -> None:
+    """Turns off radio of a running Wi-Fi to simulate abrupt AP power-off.
+
+    This method stops beacon and radio frame transmissions immediately via
+    `hostapd_cli disable` without sending deauthentication frames to connected
+    clients or tearing down interfaces/configurations. The specified Wi-Fi
+    network must be currently running. Unlike `stop_wifi`, which gracefully
+    shuts down hostapd and deauthenticates stations, `turn_off_radio` is used to
+    test client behavior when an AP suddenly disappears (e.g., missing beacon
+    detection, auto-connect recovery).
+
+    Args:
+      wifi_info: The `WifiInfo` object for the running Wi-Fi network whose radio
+        transmission should be turned off.
+
+    Raises:
+      Error: If the `wifi_info` is not found among running Wi-Fi instances.
+    """
+    self._wifi_manager.turn_off_radio(wifi_info)
 
   def get_all_known_stations(
       self, wifi_info: wifi_configs.WifiInfo
@@ -579,48 +697,15 @@ class OpenWrtDevice:
         device=self, interface=wifi_info.interface, mac_address=mac_address
     )
 
-  def get_interface_ip_iw_map(self) -> Mapping[str, IpInterface]:
-    """Gets all interfaces and their information.
+  def restart_dhcp_server(self, interface: str | None = None) -> None:
+    """Restarts the DHCP server for the given interface or running networks.
 
-    This method also correlates the information from `iw dev` command with the
-    information from `ip addr show` command to get the wireless interface
-    information on matched interface names.
-
-    Returns:
-      A mapping of interface name to interface information.
+    Args:
+      interface: The interface name (e.g. wlan0, br-lan) whose DHCP server
+        should be restarted. If None, restarts DHCP for all running networks.
     """
-    interfaces: Sequence[ip_utils.IpAddrInterface] = (
-        ip_utils.get_all_ip_addr_interfaces(self)
-    )
-    iw_interfaces = iw_utils.get_all_interfaces(self)
-    iw_interfaces_map = {
-        interface.name: interface for interface in iw_interfaces
-    }
-    # IP address is in the format of `ip_addr/mask_len`.
-    parse_ipv4_addr = (
-        lambda ip_addr: ipaddress.IPv4Address(ip_addr.split('/')[0])
-        if ip_addr is not None
-        else None
-    )
-
-    parse_subnet_addr = (
-        lambda subnet_addr: ipaddress.IPv4Network(subnet_addr, strict=False)
-        if subnet_addr is not None
-        else None
-    )
-
-    return {
-        intf.name: IpInterface(
-            id=intf.id,
-            name=intf.name,
-            type=intf.link_type,
-            mac_address=intf.mac_address,
-            state=intf.state,
-            ip=parse_ipv4_addr(intf.ipv4_address),
-            subnet=parse_subnet_addr(intf.ipv4_address),
-            iw_interface=iw_interfaces_map.get(intf.name),
-        ) for intf in interfaces
-    }
+    if self._wifi_manager is not None:
+      self._wifi_manager.restart_dhcp_server(interface)
 
   def get_all_wifi_ssid(self) -> Sequence[str]:
     """Gets all currently broadcasting Wi-Fi SSIDs."""
@@ -630,13 +715,23 @@ class OpenWrtDevice:
         if interface.type == 'AP' and interface.ssid is not None
     ]
 
+  def _get_or_init_sniffer_manager(
+      self,
+  ) -> sniffer_manager.SnifferManagerProtocol:
+    """Gets the sniffer manager instance; Initializes it if not yet."""
+    if self._sniffer_manager is None:
+      self._sniffer_manager = sniffer_manager.SnifferManager(device=self)
+      self._sniffer_manager.initialize()
+    return self._sniffer_manager
+
   def start_packet_capture(
       self,
+      network_config: wifi_configs.NetworkConfig | None = None,
       wifi_config: wifi_configs.WiFiConfig | None = None,
       freq_config: wifi_configs.FreqConfig | None = None,
       capture_config: wifi_configs.PcapConfig | None = None,
-  ):
-    """Starts pacaket capture on a specific channel.
+  ) -> None:
+    """Starts packet capture on a specific channel.
 
     You need to provide either wifi_config or freq_config. If you provide
     `freq_config`, this will monitor the frequency band specified by it. If you
@@ -644,41 +739,209 @@ class OpenWrtDevice:
     monitor the same channel that is used by the WiFi network.
 
     Args:
+      network_config: The WiFi network to capture the packets.
       wifi_config: The WiFi network to capture the packets.
       freq_config: The frequency to capture the packets.
       capture_config: The configuration to control the packet capture process.
 
     Raises:
-      Error: If both wifi_config and freq_config are provided or not provided.
+      Error: If not exactly one of network_config, wifi_config, or freq_config
+        is provided.
     """
-    if sum([wifi_config is not None, freq_config is not None]) != 1:
+    if (
+        sum((
+            network_config is not None,
+            wifi_config is not None,
+            freq_config is not None,
+        ))
+        != 1
+    ):
       raise Error(_ERR_START_PACKET_CAPTURE_ARG_ERROR.format(device=self))
     if self._wifi_manager.is_alive:
       raise Error(_ERR_USE_AS_BOTH_AP_AND_SNIFFER.format(device=self))
 
-    if wifi_config is not None:
-      freq_config = wifi_configs.get_freq_config(wifi_config)
-    self._sniffer_manager.start_capture(
-        freq_config=freq_config, capture_config=capture_config
-    )
+    manager = self._get_or_init_sniffer_manager()
+    if network_config is not None:
+      manager.start_packet_capture_with_network_config(
+          network_config=network_config, capture_config=capture_config
+      )
+    elif wifi_config is not None:
+      manager.start_packet_capture_with_wifi_config(
+          wifi_config=wifi_config, capture_config=capture_config
+      )
+    elif freq_config is not None:
+      manager.start_capture(
+          freq_config=freq_config, capture_config=capture_config  # pyrefly: ignore[bad-argument-type]
+      )
 
   def stop_packet_capture(
       self,
       current_test_info: runtime_test_info.RuntimeTestInfo | None = None,
       band_type: wifi_configs.BandType | None = None,
   ):
-    """Stops packet capture on the band specified, or all bands if no band is specified."""
-    self._sniffer_manager.stop_capture(
+    """Stops packet capture.
+
+    Stops packet capture on the band specified, or all bands if no band is
+    specified.
+
+    Args:
+      current_test_info: If provided, this will move the captured packets to
+        `current_test_info.output_path`. Otherwise the captured packets will be
+        removed.
+      band_type: The band on which to stop packet capture.
+    """
+    self._get_or_init_sniffer_manager().stop_capture(
         current_test_info=current_test_info, band_type=band_type
     )
 
   def get_capture_file(self) -> str | None:
     """Gets the full path of the last capture."""
-    return self._sniffer_manager.get_capture_file()
+    capture_files = self._get_or_init_sniffer_manager().get_capture_files()
+    if capture_files is None:
+      return None
+    if len(capture_files) > 1:
+      self.log.warning(
+          'Multiple capture files found, returning the first one: %s',
+          capture_files,
+      )
+    return capture_files[0]
+
+  def add_station_interface(
+      self, phy_name: str, iface_name: str, mac_address: str
+  ) -> None:
+    """Adds a virtual station interface to the given phy.
+
+    If the interface succeeds to be created, but fails to be configured or
+    brought up, deletion is initiated.
+
+    Args:
+      phy_name: The name of the physical device to add interface to.
+      iface_name: The name of the virtual interface to add.
+      mac_address: The MAC address to assign to the new interface.
+
+    Raises:
+      Error: If the interface fails to be created or come up after being added.
+    """
+    try:
+      self.ssh.execute_command(
+          constants.Commands.IW_DEV_ADD.format(
+              phy=phy_name, interface=iface_name
+          )
+      )
+    except ssh_lib.ExecuteCommandError as e:
+      raise Error(f'Failed to create interface {iface_name}: {e}') from e
+    try:
+      self.ssh.execute_command(
+          constants.Commands.IP_LINK_SET_ADDRESS.format(
+              interface=iface_name, mac_address=mac_address
+          )
+      )
+      self.ssh.execute_command(
+          constants.Commands.IP_LINK_UP.format(interface=iface_name)
+      )
+    except ssh_lib.ExecuteCommandError as e:
+      self.delete_interface(iface_name)
+      raise Error(f'Failed to bring up interface {iface_name}: {e}') from e
+
+  def delete_interface(self, iface_name: str) -> None:
+    """Deletes a virtual interface.
+
+    Args:
+      iface_name: The name of the virtual interface to delete.
+    """
+    self.ssh.execute_command(
+        constants.Commands.IW_DEV_DEL.format(interface=iface_name),
+        ignore_error=True,
+    )
+
+  def _log_certificate_info(self, cert_file: pathlib.PurePosixPath) -> None:
+    """Logs the certificate information to the syslog.
+
+    Args:
+      cert_file: The path to the certificate file to log.
+    """
+    cmd = (
+        f"openssl x509 -in '{cert_file}' -noout -text 2>&1 | "
+        'logger -t openssl-test'
+    )
+    self.ssh.execute_command(command=cmd, ignore_error=True)
+
+  def upload_certificates(
+      self, cert: certificate.Certificate
+  ) -> certificate.CertificatesData:
+    """Uploads certificates to the router.
+
+    Args:
+      cert: The certificate content to upload.
+
+    Returns:
+      CertificatesData containing the paths on the router.
+    """
+    suffix = mobly_logger.get_log_file_timestamp()
+    work_dir = self.remote_work_dir
+
+    work_path = pathlib.PurePosixPath(work_dir)
+    ca_cert_file = work_path / f'ca_cert_{suffix}.pem'
+    cert_file = work_path / f'cert_{suffix}.pem'
+    key_file = work_path / f'key_{suffix}.pem'
+    eap_user_file = (
+        work_path / f'eap_user_{suffix}.conf' if cert.eap_users else None
+    )
+
+    def _push_content(content: str, dest_path: pathlib.PurePosixPath):
+      with tempfile.NamedTemporaryFile(mode='w', delete=False) as tmp:
+        tmp.write(content)
+        tmp_name = tmp.name
+      try:
+        self.push_file(tmp_name, str(dest_path), change_permission=True)
+      finally:
+        os.remove(tmp_name)
+
+    _push_content(cert.ca_cert, ca_cert_file)
+    _push_content(cert.cert, cert_file)
+    _push_content(cert.private_key, key_file)
+    if cert.eap_users and eap_user_file is not None:
+      _push_content(cert.eap_users, eap_user_file)
+
+    self._log_certificate_info(ca_cert_file)
+
+    return certificate.CertificatesData(
+        ca_cert_file=ca_cert_file,
+        cert_file=cert_file,
+        key_file=key_file,
+        eap_user_file=eap_user_file,
+        suffix=suffix,
+    )
+
+  def remove_certificates(
+      self, cert_data: certificate.CertificatesData
+  ) -> None:
+    """Removes certificates from the router.
+
+    Args:
+      cert_data: The certificates data containing paths to remove.
+    """
+    self.remove_file(str(cert_data.ca_cert_file), ignore_error=True)
+    self.remove_file(str(cert_data.cert_file), ignore_error=True)
+    self.remove_file(str(cert_data.key_file), ignore_error=True)
+    if cert_data.eap_user_file:
+      self.remove_file(str(cert_data.eap_user_file), ignore_error=True)
 
   def teardown(self):
     """Tears the device object down."""
+    if self._is_torn_down:
+      return
+    self._is_torn_down = True
+
     self.log.info('Tearing down the controller.')
-    self._sniffer_manager.teardown()
+    if self._sniffer_manager is not None:
+      self._sniffer_manager.teardown()
+      self._sniffer_manager = None
+    # Stop the captive portal server before tearing down the WiFi manager
+    # because stopping the captive portal restores the network configuration by
+    # restarting the DHCP server on active WiFi interfaces. If WiFi manager is
+    # torn down first, the DHCP server restarted during stop will be left
+    # running as an orphaned process on the device port.
+    self.stop_captive_portal_server()
     self._wifi_manager.teardown()
     self._ssh.disconnect()

@@ -16,10 +16,38 @@
 
 import abc
 
+from mobly.controllers.wifi.lib.encryption import constants
+from mobly.controllers.wifi.lib.encryption import uci_encryptions
+
 
 class BaseEncryptionConfig(abc.ABC):
   """Base class for encryption config objects."""
 
   @abc.abstractmethod
+  def get_uci_encryption_config(self) -> uci_encryptions.UciEncryptionConfig:
+    """Returns the UCI encryption config.
+
+    Returns:
+      The UCI encryption config.
+    """
+
+  @abc.abstractmethod
+  def validate(self) -> None:
+    """Validates the encryption config."""
+
+  @abc.abstractmethod
   def update_hostapd_conf(self, hostapd_conf):
     """Writes the encryption configs into the hostapd config object."""
+
+  def get_ft_key_mgmt(self) -> set[constants.KeyMgmt]:
+    """Returns the FT (Fast Transition) key management suites.
+
+    Returns:
+      A set of KeyMgmt values for Fast Transition, empty if not supported.
+    """
+    return set()
+
+  @property
+  def password(self) -> str | None:
+    """Returns the password for the encryption config."""
+    return None

@@ -17,10 +17,12 @@
 import enum
 import random
 import string
+from typing import override
 
 from mobly.controllers.wifi.lib import errors
 from mobly.controllers.wifi.lib import utils
 from mobly.controllers.wifi.lib.encryption import base_encryption_config
+from mobly.controllers.wifi.lib.encryption import uci_encryptions
 
 # Length for valid WEP keys.
 # Length for valid WEP keys in the form of ascii strings.
@@ -82,9 +84,10 @@ class Wep(base_encryption_config.BaseEncryptionConfig):
     else:
       self._keys = keys or []
     self._password = None
-    self._validate()
+    self.validate()
 
-  def _validate(self):
+  @override
+  def validate(self) -> None:
     """Validates the configurations are valid."""
     if len(self._keys) > 4:
       raise errors.ConfigError(
@@ -127,6 +130,7 @@ class Wep(base_encryption_config.BaseEncryptionConfig):
         f'Got invalid WEP encryption key length: {len(key)}'
     )
 
+  @override
   def update_hostapd_conf(self, hostapd_conf):
     """See docstring of base class."""
     hostapd_conf.set_password(self._password)
@@ -141,3 +145,30 @@ class Wep(base_encryption_config.BaseEncryptionConfig):
       # When using the ASCII string format, keys must be surrounded by quotes.
       return f'"{key}"'
     return key
+
+  @property
+  def keys(self) -> tuple[str, ...]:
+    """The list of WEP keys used in the encryption configuration."""
+    return tuple(self._format_key(key) for key in self._keys)
+
+  @override
+  @property
+  def password(self) -> str | None:
+    """Returns the password for the encryption config."""
+    return self._password
+
+  @override
+  def get_uci_encryption_config(self) -> uci_encryptions.UciEncryptionConfig:
+    """Returns the UCI encryption config."""
+    if self._auth_algs == AuthAlgs.SHARED:
+      encryption = uci_encryptions.Encryption.WEP_SHARED
+    else:
+      encryption = uci_encryptions.Encryption.WEP_OPEN
+
+    return uci_encryptions.UciEncryptionConfig(
+        encryption=encryption,
+        key=str(self._default_key + 1),
+        extra_uci_params={
+            **{f'key{i + 1}': key for i, key in enumerate(self._keys)},
+        },
+    )

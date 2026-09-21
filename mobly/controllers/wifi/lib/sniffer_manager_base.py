@@ -51,20 +51,67 @@ def gen_iw_set_freq_cmd(
 
   Returns:
     The command to set the frequency.
+
+  Raises:
+    RuntimeError: if the ht_mode field is not specified in freq_config.
   """
-  freq = constants.CHANNEL_TO_FREQUENCY[freq_config.channel]
+  if freq_config.ht_mode is None:
+    raise RuntimeError(
+        'FreqConfig#ht_mode must be specified before calling'
+        ' `gen_iw_set_freq_cmd`. Ensure `FreqConfig.complete_from_phy()` has'
+        ' been called successfully, or provide an explicit HTMode. Received'
+        f' freq_config: {freq_config}'
+    )
+
+  freq = wifi_configs.get_frequency(freq_config.channel, freq_config.band_type)
   args = [str(freq)]
   match freq_config.ht_mode:
     case (
-        wifi_configs.HTMode.NOHT
-        | wifi_configs.HTMode.HT20
-        | wifi_configs.HTMode.HT40_PLUS
-        | wifi_configs.HTMode.HT40_MINUS
+        wifi_configs.Mode.NOHT
+        | wifi_configs.Mode.HT20
+        | wifi_configs.Mode.HT40_PLUS
+        | wifi_configs.Mode.HT40_MINUS
     ):
       args.append(str(freq_config.ht_mode))
-    case wifi_configs.HTMode.HT80:
+    case (
+        wifi_configs.Mode.VHT20
+        | wifi_configs.Mode.HE20
+        | wifi_configs.Mode.EHT20
+    ):
+      args.append('20')
+    case (
+        wifi_configs.Mode.VHT40
+        | wifi_configs.Mode.HE40
+        | wifi_configs.Mode.EHT40
+    ):
+      args.append('40')
+      args.append(str(freq_config.center1_freq))
+    case (
+        wifi_configs.Mode.VHT80
+        | wifi_configs.Mode.HE80
+        | wifi_configs.Mode.EHT80
+    ):
       args.append('80')
       args.append(str(freq_config.center1_freq))
+    case (
+        wifi_configs.Mode.VHT160
+        | wifi_configs.Mode.HE160
+        | wifi_configs.Mode.EHT160
+    ):
+      args.append('160')
+      args.append(str(freq_config.center1_freq))
+    case (
+        wifi_configs.Mode.VHT80_80
+        | wifi_configs.Mode.HE80_80
+        | wifi_configs.Mode.EHT80_80
+    ):
+      args.append('80+80')
+      args.append(str(freq_config.center1_freq))
+      args.append(str(freq_config.center2_freq))
+    case _:
+      raise RuntimeError(
+          f'Unsupported ht_mode in FreqConfig: {freq_config.ht_mode}.'
+      )
   return constants.Commands.IW_DEV_SET_FREQ.format(
       interface=interface, freq_args=' '.join(args)
   )
