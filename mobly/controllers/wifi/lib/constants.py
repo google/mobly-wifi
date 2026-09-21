@@ -22,6 +22,7 @@ import immutabledict
 
 CMD_SHORT_TIMEOUT = datetime.timedelta(seconds=10)
 
+# DEPRECATED: Use wifi_configs.get_frequency instead. Which supports 6G band.
 # A short summary:
 # * US: 1 - 11, 36 - 64, 100 - 144, 149 - 173 are valid. 52 - 144 are DFS
 #   channels.
@@ -75,6 +76,12 @@ CHANNEL_TO_FREQUENCY = immutabledict.immutabledict({
     173: 5865,
 })
 
+# DEPRECATED: Use wifi_configs.get_channel_and_band instead. Which supports 6G
+# band.
+FREQUENCY_TO_CHANNEL = immutabledict.immutabledict(
+    {value: key for (key, value) in CHANNEL_TO_FREQUENCY.items()}
+)
+
 
 @enum.unique
 class Ieee80211Standards(enum.StrEnum):
@@ -86,20 +93,29 @@ class Ieee80211Standards(enum.StrEnum):
   N = 'IEEE802.11n'
   AC = 'IEEE802.11ac'
   AX = 'IEEE802.11ax'
+  BE = 'IEEE802.11be'
 
 
 STANDARDS_SUPPORT_HT_CAPAB = (
     Ieee80211Standards.N,
     Ieee80211Standards.AC,
     Ieee80211Standards.AX,
+    Ieee80211Standards.BE,
 )
 
 STANDARDS_SUPPORT_VHT_CAPAB = (
     Ieee80211Standards.AC,
     Ieee80211Standards.AX,
+    Ieee80211Standards.BE,
 )
 
-STANDARDS_SUPPORT_HE_CAPAB = (Ieee80211Standards.AX,)
+STANDARDS_SUPPORT_HE_CAPAB = (
+    Ieee80211Standards.AX,
+    Ieee80211Standards.BE,
+)
+
+
+STANDARDS_SUPPORT_EHT_CAPAB = (Ieee80211Standards.BE,)
 
 
 @enum.unique
@@ -111,7 +127,9 @@ class ApModel(enum.StrEnum):
   """
 
   U6LITE = 'Ubiquiti UniFi 6 Lite'
+  U6PLUS = 'Ubiquiti UniFi 6 Plus'
   BPIR3 = 'Bananapi BPi-R3'
+  BPIR4 = 'Bananapi BPi-R4'
 
 
 @enum.unique
@@ -119,6 +137,13 @@ class IptablesAction(enum.StrEnum):
 
   INSERT = '-I'
   DELETE = '-D'
+
+
+@enum.unique
+class NftablesAction(enum.StrEnum):
+
+  INSERT = 'insert'
+  DELETE = 'delete'
 
 
 @enum.unique
@@ -139,6 +164,7 @@ class Commands(enum.StrEnum):
   IP_LINK_ADD_VETH_PAIR = 'ip link add {veth} type veth peer name {veth_peer}'
   IP_LINK_ADD_BRIDGE = 'ip link add {interface} type bridge'
   IP_LINK_BIND = 'ip link set {interface} master {bindee_interface}'
+  IP_LINK_SET_ADDRESS = 'ip link set {interface} address {mac_address}'
 
   IW_PHY = 'iw phy'
   IW_LIST = 'iw list'
@@ -160,7 +186,7 @@ class Commands(enum.StrEnum):
   )
   IW_DEV_SCAN = 'iw dev {interface} scan {frequencies} {ssids}'
 
-  # Firewall rules related commands
+  # Firewall rules related commands (iptables)
   FIREWALL_ENABLE_IP_FORWARD = 'echo 1 > /proc/sys/net/ipv4/ip_forward'
   FIREWALL_ENABLE_NAT = (
       'iptables -t nat -I POSTROUTING -o {interface} -j MASQUERADE'
@@ -173,6 +199,19 @@ class Commands(enum.StrEnum):
       ' conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT'
   )
 
+  # Firewall rules related commands (nftables)
+  FIREWALL_NFTABLES_ENABLE_NAT = (
+      'nft insert rule inet fw4 srcnat oifname "{interface}" masquerade'
+  )
+  FIREWALL_NFTABLES_FORWARD_TRAFFIC = (
+      'nft {action} rule inet fw4 forward iifname "{in_interface}" oifname'
+      ' "{out_interface}" accept'
+  )
+  FIREWALL_NFTABLES_FORWARD_KNOWN_TRAFFIC = (
+      'nft {action} rule inet fw4 forward iifname "{in_interface}" oifname'
+      ' "{out_interface}" ct state established,related accept'
+  )
+
   START_TCPDUMP = (
       'tcpdump -vv -i {interface} -U -e -B 1024 -w {file_path} {args}'
   )
@@ -182,8 +221,24 @@ class Commands(enum.StrEnum):
   OPKG_UPDATE = 'opkg update'
   OPKG_INSTALL = 'opkg install {package}'
 
+  # Apk commands.
+  APK_LIST = 'apk info -e {package}'
+  APK_UPDATE = 'apk update'
+  APK_INSTALL = 'apk add {package}'
+  APK_DEL = 'apk del {package}'
+
   HOSTAPD_START = '/usr/sbin/hostapd -dd -t -K {conf_path}'
   HOSTAPD_CLI = 'hostapd_cli -p {ctrl_path} -i {interface} {command_args}'
+
+  DNSMASQ_ENABLED = '/etc/init.d/dnsmasq enabled'
+  DNSMASQ_DISABLE_AND_STOP = (
+      'ubus call service delete \'{ "name": "dnsmasq" }\' || true; '
+      '/etc/init.d/dnsmasq stop || true; '
+      '/etc/init.d/dnsmasq disable || true'
+  )
+  DNSMASQ_ENABLE_AND_START = (
+      '/etc/init.d/dnsmasq enable || true; /etc/init.d/dnsmasq start || true'
+  )
 
   KILLALL = 'killall {name}'
 
@@ -191,20 +246,31 @@ class Commands(enum.StrEnum):
 
   REBOOT = 'sudo reboot'
 
-  CHECK_DEVICE_REBOOT_READY = 'test -f /tmp/cros/status/ready'
+  CHECK_DEVICE_REBOOT_READY = 'true'
+
+  CHECK_DEVICE_REBOOT_READY_CUSTOM_IMAGE = 'test -f /tmp/cros/status/ready'
 
   # The command to obtain syslog in OpenWrt systems.
   LOGREAD = 'logread -f'
 
+  # The command to obtain the configured WAN interface name from OpenWrt UCI.
+  GET_WAN_INTERFACE = (
+      'uci -q get network.wan.device || uci -q get network.wan.ifname'
+  )
 
-# The network interface to for the AP device to connect with wide area network.
-WAN_INTERFACE = 'br-lan'
+
+# The default network interface for the AP device to connect with WAN.
+DEFAULT_WAN_INTERFACE = 'br-lan'
+WAN_INTERFACE = DEFAULT_WAN_INTERFACE
 
 # Constant fot the name of hostapd.
 HOSTAPD = 'hostapd'
 
-# Consant for the name of dnsmasq.
+# Constant for the name of dnsmasq.
 DNSMASQ = 'dnsmasq'
+
+# Default remote DHCP lease file path on OpenWrt systems.
+DEFAULT_DHCP_LEASE_FILE = '/tmp/dhcp.leases'
 
 
 # The AP device SSH username.
@@ -247,3 +313,6 @@ DEVICE_INFO_PATTERN = re.compile(
 )
 
 VERSION_SNAPSHOT = 'SNAPSHOT'
+
+BROADCAST_MAC_ADDRESS = 'ff:ff:ff:ff:ff:ff'
+DEFAULT_DEAUTH_REASON_CODE = 3

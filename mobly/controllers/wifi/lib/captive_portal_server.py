@@ -17,19 +17,24 @@
 This module is responsible for starting and stopping the captive portal server.
 """
 
-import datetime
 import pathlib
-import traceback
-from typing import Any
+from typing import Any, Protocol, Sequence
 
 from mobly import logger as mobly_logger
 
 from mobly.controllers.wifi.lib import ssh as ssh_lib
 from mobly.controllers.wifi.lib import constants
 from mobly.controllers.wifi.lib import errors
-from mobly.controllers.wifi.lib import utils as wifi_utils
+from mobly.controllers.wifi.lib import opennds_captive_portal_server
+from mobly.controllers.wifi.lib import wifi_configs
 
 OpenWrtDevice = Any
+
+_SSH_ERRORS = (
+    ssh_lib.RemoteTimeoutError,
+    ssh_lib.SSHRemoteError,
+    ssh_lib.ExecuteCommandError,
+)
 
 _CAPTIVE_PORTAL_SCRIPT_PATH = '/tmp/captive_portal_test'
 _CAPTIVE_PORTAL_SCRIPT_FILE_NAME = 'captive_portal_http.py'
@@ -75,11 +80,35 @@ if __name__ == "__main__":
 _PORT = 80
 _STATUS_CODE = 302
 _REDIRECT_URL = 'http://example.com'
-_NETSTAT_CHECK_TIMEOUT = datetime.timedelta(seconds=10)
-_NETSTAT_CHECK_INTERVAL = datetime.timedelta(seconds=2)
 
 
-class CaptivePortalServer:
+class CaptivePortalServerProtocol(Protocol):
+  """Protocol defining interface for captive portal server managers."""
+
+  @property
+  def is_alive(self) -> bool:
+    """True if the service is alive; False otherwise."""
+    ...
+
+  @property
+  def use_opennds(self) -> bool:
+    """True if using opennds; False otherwise."""
+    ...
+
+  def start_captive_portal_server(
+      self,
+      wifi_info: Sequence[wifi_configs.WifiInfo] | None = None,
+      dhcp_lease_file: str | None = None,
+  ) -> None:
+    """Starts the captive portal server."""
+    ...
+
+  def stop_captive_portal_server(self) -> None:
+    """Stops the captive portal server."""
+    ...
+
+
+class HttpRedirectCaptivePortalServer:
   """The class for managing the lifecycle of captive portal server.
 
   This class is responsible for starting and stopping the captive portal server.
@@ -88,9 +117,13 @@ class CaptivePortalServer:
   _captive_portal_server_file: pathlib.PurePosixPath
 
   def __init__(self, device: 'OpenWrtDevice'):
+    """Constructor.
+
+    Args:
+      device: The OpenWrt device controller.
+    """
     self._device = device
     self._remote_process = None
-    self._netstat_grep_port_error = None
 
     self._log = mobly_logger.PrefixLoggerAdapter(
         device.log,
@@ -102,35 +135,14 @@ class CaptivePortalServer:
     )
 
   @property
+  def use_opennds(self) -> bool:
+    """True if using opennds; False otherwise."""
+    return False
+
+  @property
   def is_alive(self) -> bool:
     """True if the service is alive; False otherwise."""
     return self._remote_process is not None
-
-  def _is_listening_on_port(self) -> bool:
-    """Checks if a process is listening on port {_PORT}."""
-    self._netstat_grep_port_error = None
-    command = f'netstat -tlnp | grep :{_PORT}'
-    try:
-      netstat_output = self._device.ssh.execute_command(
-          command=command,
-          timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
-      )
-      for line in netstat_output.splitlines():
-        self._device.ssh.execute_command(
-            f'echo "{line}" | logger -t captive_portal_netstat',
-            timeout=constants.CMD_SHORT_TIMEOUT.total_seconds()
-        )
-      self._log.debug('Successfully found process on port %s.', _PORT)
-      return True
-    except ssh_lib.ExecuteCommandError as e:
-      self._netstat_grep_port_error = e
-      self._device.ssh.execute_command(
-          f'echo "No process listening on port {_PORT}" | logger -t'
-          ' captive_portal_netstat',
-          timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
-      )
-      self._log.warning(f':No process listening on port {_PORT}')
-      return False
 
   def _create_captive_portal_server_file(self) -> None:
     """Creates a Python file that runs a simple HTTP redirect server."""
@@ -149,23 +161,28 @@ class CaptivePortalServer:
           command=command, timeout=constants.CMD_SHORT_TIMEOUT.total_seconds()
       )
       self._log.debug('Pushed file having script content to openwrt.')
-    except (
-        ssh_lib.RemoteTimeoutError,
-        ssh_lib.SSHRemoteError,
-        ssh_lib.ExecuteCommandError,
-    ) as e:
+    except _SSH_ERRORS as e:
       raise errors.CaptivePortalError(
           'Failed to push file containing redirect server script to openwrt.'
       ) from e
 
-  def start_captive_portal_server(self) -> None:
+  def start_captive_portal_server(
+      self,
+      wifi_info: Sequence[wifi_configs.WifiInfo] | None = None,
+      dhcp_lease_file: str | None = None,
+  ) -> None:
     """Starts the captive portal server if it is not already running.
 
     This method starts a captive portal server in the background.
 
+    Args:
+      wifi_info: Wi-Fi info (unused).
+      dhcp_lease_file: Path to DHCP lease file (unused).
+
     Raises:
       errors.CaptivePortalError: If the captive portal server failed to start.
     """
+    del wifi_info, dhcp_lease_file  # Unused.
     if self.is_alive:
       self._log.debug('Captive portal server is already running.')
       return
@@ -174,8 +191,8 @@ class CaptivePortalServer:
     self._log.debug('Starting captive portal server.')
     try:
       command = (
-          f'python3 -u {self._captive_portal_server_file} {_PORT} {_STATUS_CODE}'
-          f' {_REDIRECT_URL} 2>&1 | logger -t captive_portal'
+          f'python3 -u {self._captive_portal_server_file} {_PORT}'
+          f' {_STATUS_CODE} {_REDIRECT_URL} 2>&1 | logger -t captive_portal'
       )
       self._log.debug(f'Starting captive portal server with command {command}.')
       self._remote_process = self._device.ssh.start_remote_process(
@@ -186,41 +203,13 @@ class CaptivePortalServer:
       self._log.debug(
           f'Started captive portal server with pid {self._remote_process.pid}.'
       )
-
-      # Verify the server is listening on port {_PORT} with retries.
-      self._log.debug(f'Checking what is running on port {_PORT}.')
-      if not wifi_utils.wait_for_predicate(
-          predicate=self._is_listening_on_port,
-          timeout=_NETSTAT_CHECK_TIMEOUT,
-          interval=_NETSTAT_CHECK_INTERVAL,
-      ):
-        message = (
-            f'{repr(self)} Captive portal server did not start listening on'
-            f' port {_PORT} after'
-            f' {_NETSTAT_CHECK_TIMEOUT.total_seconds()} seconds.'
-        )
-        if self._netstat_grep_port_error is not None:
-          error_traceback = '\n'.join(
-              traceback.format_exception(self._netstat_grep_port_error)
-          )
-          message += f' Netstat error:\n{error_traceback}'
-          self._netstat_grep_port_error = None
-        raise errors.CaptivePortalError(message)
-
-    except (
-        ssh_lib.RemoteTimeoutError,
-        ssh_lib.SSHRemoteError,
-        ssh_lib.ExecuteCommandError,
-    ) as e:
+    except _SSH_ERRORS as e:
       raise errors.CaptivePortalError(
           'Failed to configure captive portal.'
       ) from e
 
   def stop_captive_portal_server(self):
     """Stops the captive portal server.
-
-    This method stops the captive portal server by terminating the process.
-    After stopping the server, the script file is removed from the device.
 
     Raises:
       errors.CaptivePortalError: If the captive portal server failed to stop.
@@ -245,12 +234,72 @@ class CaptivePortalServer:
       self._device.ssh.rm_file(str(self._captive_portal_server_file))
       self._device.ssh.rm_dir(_CAPTIVE_PORTAL_SCRIPT_PATH)
       self._log.debug('Removed captive portal server script file.')
-    except (
-        ssh_lib.RemoteTimeoutError,
-        ssh_lib.SSHRemoteError,
-        ssh_lib.ExecuteCommandError,
-    ) as e:
+    except _SSH_ERRORS as e:
       self._remote_process = None
       raise errors.CaptivePortalError(
           'Failed to stop captive portal server.'
       ) from e
+
+
+class CaptivePortalServer(CaptivePortalServerProtocol):
+  """Proxy captive portal server that delegates to HttpRedirect or Opennds."""
+
+  def __init__(
+      self,
+      device: OpenWrtDevice,
+      use_opennds: bool = False,
+      dhcp_lease_file: str | None = None,
+  ):
+    """Constructor.
+
+    Args:
+      device: The OpenWrt device controller.
+      use_opennds: Whether to configure and use opennds for captive portal.
+      dhcp_lease_file: Optional path to the DHCP lease file.
+    """
+    self._device = device
+    self._use_opennds = use_opennds
+    self._dhcp_lease_file = dhcp_lease_file
+    self._delegate = None
+
+  def _get_delegate(self) -> CaptivePortalServerProtocol:
+    """Returns the active delegation captive portal server."""
+    if self._delegate is not None:
+      return self._delegate
+
+    if self._use_opennds:
+      self._delegate = opennds_captive_portal_server.OpenndsCaptivePortalServer(
+          device=self._device,
+          package_manager_obj=getattr(self._device, '_package_manager', None),
+          dhcp_lease_file=self._dhcp_lease_file,
+      )
+    else:
+      self._delegate = HttpRedirectCaptivePortalServer(device=self._device)
+
+    return self._delegate
+
+  @property
+  def is_alive(self) -> bool:
+    """True if the service is alive; False otherwise."""
+    return self._get_delegate().is_alive
+
+  @property
+  def use_opennds(self) -> bool:
+    """True if using opennds; False otherwise."""
+    return self._get_delegate().use_opennds
+
+  def start_captive_portal_server(
+      self,
+      wifi_info: Sequence[wifi_configs.WifiInfo] | None = None,
+      dhcp_lease_file: str | None = None,
+  ) -> None:
+    """Starts the captive portal server."""
+    target_lease_file = dhcp_lease_file or self._dhcp_lease_file
+    self._get_delegate().start_captive_portal_server(
+        wifi_info=wifi_info,
+        dhcp_lease_file=target_lease_file,
+    )
+
+  def stop_captive_portal_server(self) -> None:
+    """Stops the captive portal server."""
+    self._get_delegate().stop_captive_portal_server()

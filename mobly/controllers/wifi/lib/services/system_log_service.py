@@ -64,6 +64,7 @@ class SystemLogService(base_service.BaseService):
     """Starts streaming the specified logs to host."""
     self._log.debug('Starting.')
     self._assert_not_running()
+    self._excerpt_generator = file_clipper.FileClipper(self._host_log_path)
     self._start_log_subprocess()
     self._log.debug('Started.')
 

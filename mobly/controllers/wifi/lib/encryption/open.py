@@ -14,11 +14,29 @@
 
 """Configurations for the encryption mode OPEN."""
 
+from typing import override
+
 from mobly.controllers.wifi.lib.encryption import base_encryption_config
+from mobly.controllers.wifi.lib.encryption import uci_encryptions
 
 
 class Open(base_encryption_config.BaseEncryptionConfig):
   """The configuration class for the encryption type OPEN."""
 
+  @override
   def update_hostapd_conf(self, hostapd_conf):
+    del self
     hostapd_conf.set_password(None)
+
+  @override
+  def validate(self) -> None:
+    del self
+    pass
+
+  @override
+  def get_uci_encryption_config(self) -> uci_encryptions.UciEncryptionConfig:
+    """Returns the UCI encryption config."""
+    del self
+    return uci_encryptions.UciEncryptionConfig(
+        encryption=uci_encryptions.Encryption.NONE,
+    )

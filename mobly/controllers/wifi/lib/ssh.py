@@ -33,9 +33,10 @@ from mobly import logger as mobly_logger
 import paramiko
 from paramiko import channel
 from paramiko import sftp_attr
-from zmq.ssh import forward
 
 from mobly.controllers.wifi.lib import channel_file_streamer
+from mobly.controllers.wifi.lib import ssh_forward as forward
+
 
 _SFTP_NOT_CONNECTED_ERROR_MESSAGE = (
     'Cannot use SFTP without opening the SFTP session. Probably because the'
@@ -95,7 +96,7 @@ class ExecuteCommandError(Error):
   **********************End of error message*****************
   """
 
-  command_results: CommandResults = None
+  command_results: CommandResults = None  # pyrefly: ignore[bad-assignment]
   command: str = ''
 
   def __init__(self, ssh: SSHProxy, command: str,
@@ -135,6 +136,7 @@ class SSHProxy:
     log: A logger adapted from root logger with an added prefix specific to a
       remote test machine. The prefix is "[SSHProxy| hostname:ssh_port] ".
     ssh_client: the underlying Paramiko SSHClient object.
+    is_connected: Whether the underlying SSH transport is still usable.
   """
 
   def __init__(
@@ -191,11 +193,28 @@ class SSHProxy:
   def __repr__(self):
     return f'<SSHProxy|{self._hostname}:{self._ssh_port}>'
 
+  @property
+  def is_connected(self) -> bool:
+    """Whether the underlying SSH transport is still usable.
+
+    This is a local, non-blocking check against the transport state that
+    Paramiko maintains in the background, so it is cheap enough to call before
+    every operation.
+
+    It becomes False once Paramiko has observed the peer closing or resetting
+    the connection, which covers the common case of a session that was severed
+    while the machine sat idle. It cannot detect a silently dropped network,
+    e.g. an unplugged cable, until an actual I/O operation fails.
+    """
+    transport = self.ssh_client.get_transport()
+    return transport is not None and transport.is_active()
+
   def connect(
       self,
       timeout: float | None = None,
       banner_timeout: float | None = None,
       open_sftp: bool = True,
+      keepalive_interval: float = 0,
   ) -> None:
     """Connects to the test machine.
 
@@ -205,6 +224,14 @@ class SSHProxy:
       open_sftp: Whether to open a SFTP session after connection established.
         Without SFTP session, methods that related to remote file operations
         cannot be used.
+      keepalive_interval: Interval in seconds between the keepalive messages
+        sent on an otherwise idle session. 0, the default, sends none. Setting
+        this serves two purposes: it discourages the server, a NAT table or a
+        firewall from dropping a session that sits idle, and it makes a session
+        that did get dropped observable, because the failed send marks the
+        transport inactive and `is_connected` starts reporting it. Without
+        traffic Paramiko has no reason to notice, so a dead session keeps
+        looking healthy until the next command runs against it.
     """
     self.log.info('Connecting to %s:%d', self._hostname, self._ssh_port)
 
@@ -219,6 +246,12 @@ class SSHProxy:
         timeout=timeout,
         banner_timeout=banner_timeout,
     )
+
+    # The transport only exists once the connection is established.
+    transport = self.ssh_client.get_transport()
+    if keepalive_interval > 0 and transport is not None:
+      transport.set_keepalive(keepalive_interval)
+
     if open_sftp:
       self.open_sftp()
 
@@ -275,6 +308,7 @@ class SSHProxy:
       chain_host = self._hostname
       chain_port = remote_port
       ssh_transport = self.ssh_client.get_transport()
+      logger = self.log
 
     if local_port != 0 and local_port in self._port_forward_servers:
       forwarded_server = self._port_forward_servers[local_port]
@@ -298,7 +332,7 @@ class SSHProxy:
         target=port_forward_server.serve_forever, daemon=True)
     thread.start()
 
-    _, forwarded_local_port = port_forward_server.server_address
+    _, forwarded_local_port = port_forward_server.server_address  # pyrefly: ignore[bad-unpacking]
     self._port_forward_servers[forwarded_local_port] = port_forward_server
 
     self.log.debug('Forwarded address %s:%d to local port %d', self._hostname,
@@ -557,7 +591,7 @@ class SSHProxy:
       remote_dir = remote_dir.rstrip('/')
     remote_stat_info = self.stat(remote_dir)
     if remote_stat_info:  # path exists
-      if stat.S_ISDIR(remote_stat_info.st_mode):
+      if stat.S_ISDIR(remote_stat_info.st_mode):  # pyrefly: ignore[bad-argument-type]
         return  # already a directory; nothing to do.
       else:
         raise RuntimeError('%s is not a directory.' % remote_dir)
@@ -583,7 +617,7 @@ class SSHProxy:
     if dir_path != '/':
       dir_path = dir_path.rstrip('/')
     dir_stat_info = self.stat(dir_path)
-    return dir_stat_info and stat.S_ISDIR(dir_stat_info.st_mode)  # pytype: disable=bad-return-type
+    return dir_stat_info and stat.S_ISDIR(dir_stat_info.st_mode)  # pyrefly: ignore[bad-argument-type, bad-return]
 
   def is_file(self, file_path: str) -> bool:
     """Checks whether the file_path is a file.
@@ -596,7 +630,7 @@ class SSHProxy:
     """
     file_path = file_path.rstrip('/')
     file_stat_info = self.stat(file_path)
-    return file_stat_info and stat.S_ISREG(file_stat_info.st_mode)  # pytype: disable=bad-return-type
+    return file_stat_info and stat.S_ISREG(file_stat_info.st_mode)  # pyrefly: ignore[bad-argument-type, bad-return]
 
   def exists(self, remote_path: str) -> bool:
     """Checks whether the path exists on the remote machine.
@@ -921,6 +955,50 @@ class RemotePopen:
         self._stdout, output_file_path, logger)
     self._output_streamer.start()
 
+  def recv_ready(self) -> bool:
+    """Returns whether there is data waiting to be received on this channel.
+
+    This method cannot be used if output_file_path is provided during
+    initialization.
+
+    Returns:
+      True if there is data waiting to be received on this channel,
+      False otherwise.
+
+    Raises:
+      SSHRemoteError: If output_file_path is provided during initialization.
+    """
+    if self._output_streamer is not None:
+      raise SSHRemoteError(
+          self._client,
+          'recv_ready cannot be used if output_file_path is provided during'
+          ' initialization.',
+      )
+    return self._session.recv_ready()
+
+  def recv(self, nbytes: int) -> bytes:
+    """Receives data from the channel.
+
+    This method cannot be used if output_file_path is provided during
+    initialization.
+
+    Args:
+      nbytes: The maximum number of bytes to receive.
+
+    Returns:
+      The data received.
+
+    Raises:
+      SSHRemoteError: If output_file_path is provided during initialization.
+    """
+    if self._output_streamer is not None:
+      raise SSHRemoteError(
+          self._client,
+          'recv cannot be used if output_file_path is provided during'
+          ' initialization.',
+      )
+    return self._session.recv(nbytes)
+
   def communicate(self) -> tuple[str, str]:
     """Returns the stdout and stderr when the command finishes.
 
@@ -1190,10 +1268,10 @@ def _block_and_get_channel_status(channel_: channel.Channel) -> CommandResults:
   stdout_file = channel_.makefile('rb')
   stderr_file = channel_.makefile_stderr('rb')
 
-  with contextlib.closing(channel_):  # pytype: disable=wrong-arg-types
-    with contextlib.closing(stdout_file):  # pytype: disable=wrong-arg-types
+  with contextlib.closing(channel_):
+    with contextlib.closing(stdout_file):
       stdout_str = stdout_file.read().decode('utf-8')
-    with contextlib.closing(stderr_file):  # pytype: disable=wrong-arg-types
+    with contextlib.closing(stderr_file):
       stderr_str = stderr_file.read().decode('utf-8')
 
   return CommandResults(exit_code, stdout_str, stderr_str)

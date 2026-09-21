@@ -22,16 +22,17 @@ description = (
 )
 
 install_requires = [
-    'mobly>=1.12.2',
+    'dacite',
     'immutabledict',
+    'mobly>=1.12.2',
+    'packaging',
     'paramiko>=2.10.4',
     'pyzmq>=15.0.0',
-    'packaging',
 ]
 
 setuptools.setup(
     name='mobly-wifi',
-    version='1.2.0',
+    version='1.3.0',
     author='Minghao Li',
     author_email='minghaoli@google.com',
     description=description,
@@ -40,7 +41,10 @@ setuptools.setup(
     packages=setuptools.find_namespace_packages(
         include=['mobly.controllers.*']
     ),
-    package_data={'mobly.controllers.wifi': ['data/*']},
+    package_data={
+        'mobly.controllers.wifi': ['data/*'],
+    },
+    include_package_data=True,
     install_requires=install_requires,
     python_requires='>=3.11',
 )

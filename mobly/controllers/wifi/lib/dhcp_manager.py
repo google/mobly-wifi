@@ -119,7 +119,7 @@ class _SubnetIdGenerator:
       for i in range(_SUBNET_ID_MAX_COUNT):
         counter = (self._counter + i) % _SUBNET_ID_MAX_COUNT
         if counter not in self._busy_ids:
-          self._busy_ids.add(counter)
+          self._busy_ids.add(counter)  # pyrefly: ignore[missing-attribute]
           self._counter = (counter + 1) % _SUBNET_ID_MAX_COUNT
           return counter
 
@@ -138,7 +138,7 @@ class _SubnetIdGenerator:
     """
     with self._lock:
       if subnet_id in self._busy_ids:
-        self._busy_ids.remove(subnet_id)
+        self._busy_ids.remove(subnet_id)  # pyrefly: ignore[missing-attribute]
 
 
 _subnet_id_generator = _SubnetIdGenerator()
@@ -251,7 +251,7 @@ class DhcpManager:
     with open(local_path, 'w') as f:
       f.write(config_content)
     self._device.push_file(local_path, remote_path)
-    # Rename the local file so it can be directly opened on Sponge.
+    # Rename the local file so it can be directly opened in a web browser.
     os.rename(local_path, f'{local_path}.txt')
 
     return remote_path
@@ -279,7 +279,7 @@ class DhcpManager:
     """Stops the DHCP server instance on the AP device."""
     if self._subnet_id is not None:
       _subnet_id_generator.release(self._subnet_id)
-      self._subnet_id = None
+      self._subnet_id = None  # pyrefly: ignore[bad-assignment]
 
     proc = self._remote_process
     self._remote_process = None
@@ -313,3 +313,7 @@ class DhcpManager:
 
   def _get_lease_filename(self) -> str:
     return f'{self._identifier},dnsmasq.leases'
+
+  def get_lease_file_path(self) -> str:
+    """Returns the remote path of the DHCP lease file."""
+    return self._get_remote_path(self._get_lease_filename())
