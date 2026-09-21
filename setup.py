@@ -32,7 +32,7 @@ install_requires = [
 
 setuptools.setup(
     name='mobly-wifi',
-    version='1.3.0',
+    version='1.4.0',
     author='Minghao Li',
     author_email='minghaoli@google.com',
     description=description,
