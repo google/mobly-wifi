@@ -462,16 +462,17 @@ class SnifferManager:
       band_type: wifi_configs.BandType,
       proc: ssh_lib.RemotePopen,
   ):
-    """Stops remote process and set the ip link down."""
+    """Stops remote process and deletes the monitor interface."""
     proc.send_signal(signal_id=signal.SIGINT, assert_process_exit=True)
     self._log.debug('Sniffer process output: %s', proc.communicate())
 
-    # Set the ip link down
+    # Delete the monitor interface.
     self._device.ssh.execute_command(
-        command=constants.Commands.IP_LINK_DOWN.format(
+        command=constants.Commands.IW_DEV_DEL.format(
             interface=_BAND_TO_INTERFACE[band_type]
         ),
         timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
+        ignore_error=True,
     )
 
   def _pull_capture_files(

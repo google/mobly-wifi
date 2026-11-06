@@ -300,6 +300,14 @@ class OpenndsCaptivePortalServer:
       # Stop and disable OpenNDS service
       self._opennds_manager.stop()
       self._opennds_manager.disable()
+      # `/etc/init.d/opennds stop` sends SIGTERM via procd asynchronously and
+      # returns before OpenNDS finishes running `/usr/lib/opennds/libopennds.sh`
+      # to delete its nftables chains. Wait for the daemon to exit before
+      # `remove_package` deletes `/usr/lib/opennds`.
+      utils.wait_for_predicate(
+          predicate=lambda: not self._opennds_manager.is_running(),
+          timeout=constants.CMD_SHORT_TIMEOUT,
+      )
 
       if is_ram_install:
         # Symlink/binary files RAM package cleanup remains here

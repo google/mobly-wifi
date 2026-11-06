@@ -167,5 +167,5 @@ class WpaEap(wpa.WpaCommon):
         encryption=encryption,
         ieee80211w=self._get_required_pmf(),
         extra_uci_params=extra_params,
-        ciphers=self._ciphers | self._ciphers2,
+        extra_hostapd_params=self.get_extra_hostapd_params_for_ciphers(),
     )

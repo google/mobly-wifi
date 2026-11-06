@@ -28,17 +28,8 @@ _ESCAPE_MAP = {
     b't': b'\t',
 }
 
-# Reverse mapping for common control characters
-_ENCODE_MAP = {
-    ord('\\'): '\\\\',
-    ord('"'): '\\"',
-    0x1B: '\\e',
-    ord('\n'): '\\n',
-    ord('\r'): '\\r',
-    ord('\t'): '\\t',
-}
-
 _DECODE_PATTERN = re.compile(rb'\\(x[0-9a-fA-F]{2}|[\\"enrt]|.|$)|([^\\]+)')
+_MAX_SSID_BYTES = 32
 
 
 def is_printf_encoded_ssid(ssid: str | None) -> bool:
@@ -49,33 +40,6 @@ def is_printf_encoded_ssid(ssid: str | None) -> bool:
       and ssid.startswith('P"')
       and ssid.endswith('"')
   )
-
-
-def encode_printf_ssid(raw_ssid: str | bytes | SSID) -> str:
-  r"""Encodes an SSID into hostapd printf format: P\"...\"."""
-  if isinstance(raw_ssid, SSID):
-    raw_bytes = raw_ssid.raw_bytes
-  elif isinstance(raw_ssid, bytes):
-    raw_bytes = raw_ssid
-  elif isinstance(raw_ssid, str):
-    try:
-      raw_bytes = raw_ssid.encode('latin-1')
-    except UnicodeEncodeError:
-      raw_bytes = raw_ssid.encode('utf-8')
-  else:
-    raw_bytes = bytes(raw_ssid)
-  parts = ['P"']
-
-  for b in raw_bytes:
-    if b in _ENCODE_MAP:
-      parts.append(_ENCODE_MAP[b])
-    elif 32 <= b <= 126:
-      parts.append(chr(b))
-    else:
-      parts.append(f'\\x{b:02x}')
-
-  parts.append('"')
-  return ''.join(parts)
 
 
 def _unescape_bytes(content_bytes: bytes) -> bytes:
@@ -119,20 +83,22 @@ def decode_printf_ssid(ssid: str | None) -> str | None:
   if '\\' in ssid:
     return _decode_bytes_escaped(ssid.encode('latin-1'))
 
+  try:
+    raw_latin1 = ssid.encode('latin-1')
+    if any(b >= 128 for b in raw_latin1):
+      return raw_latin1.decode('utf-8')
+  except (UnicodeEncodeError, UnicodeDecodeError):
+    pass
+
   return ssid
 
 
 decode_ssid = decode_printf_ssid
 
 
-def needs_printf_encoding(ssid: str | None) -> bool:
-  """Returns True if the SSID contains characters requiring printf encoding."""
-  if ssid is None or is_printf_encoded_ssid(ssid):
-    return False
-  for char in ssid:
-    if char == '\\' or char == '"' or not (32 <= ord(char) <= 126):
-      return True
-  return False
+def _requires_hex_encoding(decoded: str) -> bool:
+  """Returns True if the decoded SSID requires hex encoding for UCI."""
+  return any(c == '\\' or not (32 <= ord(c) <= 126) for c in decoded)
 
 
 def _normalize_ssid_input(
@@ -147,9 +113,7 @@ def _normalize_ssid_input(
       decoded = value.decode('utf-8')
     except UnicodeDecodeError:
       decoded = value.decode('latin-1')
-    is_hex = any(
-        c in ('\\', '"', "'") or not (32 <= ord(c) <= 126) for c in decoded
-    )
+    is_hex = _requires_hex_encoding(decoded)
     return decoded, value, is_hex
 
   if is_printf_encoded_ssid(value):
@@ -161,15 +125,28 @@ def _normalize_ssid_input(
     is_hex = True
     return decoded, raw, is_hex
 
-  decoded = value
   try:
-    raw = decoded.encode('latin-1')
+    raw_latin1 = value.encode('latin-1')
   except UnicodeEncodeError:
-    raw = decoded.encode('utf-8')
+    raw_latin1 = None
 
-  is_hex = any(
-      c in ('\\', '"', "'") or not (32 <= ord(c) <= 126) for c in decoded
-  )
+  if raw_latin1 is not None and any(b >= 128 for b in raw_latin1):
+    try:
+      decoded = raw_latin1.decode('utf-8')
+      raw = raw_latin1
+    except UnicodeDecodeError:
+      raw_utf8 = value.encode('utf-8')
+      if len(raw_utf8) <= _MAX_SSID_BYTES:
+        raw = raw_utf8
+        decoded = value
+      else:
+        raw = raw_latin1
+        decoded = value
+  else:
+    decoded = value
+    raw = value.encode('utf-8')
+
+  is_hex = _requires_hex_encoding(decoded)
   return decoded, raw, is_hex
 
 

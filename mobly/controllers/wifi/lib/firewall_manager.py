@@ -68,12 +68,19 @@ class FirewallProtocol(Protocol):
     """Allows or removes forwarding of established/related traffic between interfaces."""
     ...
 
+  def clean_up(self) -> None:
+    """Cleans up firewall rules created by this manager."""
+    ...
+
 
 class IptablesFirewall:
   """Firewall implementation using iptables."""
 
   def __init__(self, ssh: ssh_lib.SSHProxy):
     self._ssh = ssh
+
+  def clean_up(self) -> None:
+    """Cleans up firewall rules created by this manager."""
 
   def allow_ip_forward(self) -> None:
     """Enables IP forwarding in the kernel."""
@@ -158,6 +165,22 @@ class NftablesFirewall:
         timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
     )
 
+  def _execute_rule_action(
+      self,
+      action: FirewallAction,
+      insert_cmd: str,
+      delete_cmd: str,
+      **kwargs: str,
+  ) -> None:
+    command_template = (
+        insert_cmd if action == FirewallAction.INSERT else delete_cmd
+    )
+    self._ssh.execute_command(
+        command=command_template.format(**kwargs),
+        timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
+        ignore_error=(action == FirewallAction.DELETE),
+    )
+
   def forward_traffic(
       self,
       in_interface: str,
@@ -165,19 +188,12 @@ class NftablesFirewall:
       action: FirewallAction = FirewallAction.INSERT,
   ) -> None:
     """Allows or removes forwarding of all traffic between interfaces."""
-    nftables_action = (
-        constants.NftablesAction.INSERT
-        if action == FirewallAction.INSERT
-        else constants.NftablesAction.DELETE
-    )
-    self._ssh.execute_command(
-        command=constants.Commands.FIREWALL_NFTABLES_FORWARD_TRAFFIC.format(
-            action=nftables_action,
-            in_interface=in_interface,
-            out_interface=out_interface,
-        ),
-        timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
-        ignore_error=(action == FirewallAction.DELETE),
+    self._execute_rule_action(
+        action,
+        constants.Commands.FIREWALL_NFTABLES_INSERT_FORWARD_TRAFFIC,
+        constants.Commands.FIREWALL_NFTABLES_DELETE_FORWARD_TRAFFIC,
+        in_interface=in_interface,
+        out_interface=out_interface,
     )
 
   def forward_known_traffic(
@@ -187,19 +203,20 @@ class NftablesFirewall:
       action: FirewallAction = FirewallAction.INSERT,
   ) -> None:
     """Allows or removes forwarding of established/related traffic between interfaces."""
-    nftables_action = (
-        constants.NftablesAction.INSERT
-        if action == FirewallAction.INSERT
-        else constants.NftablesAction.DELETE
+    self._execute_rule_action(
+        action,
+        constants.Commands.FIREWALL_NFTABLES_INSERT_FORWARD_KNOWN_TRAFFIC,
+        constants.Commands.FIREWALL_NFTABLES_DELETE_FORWARD_KNOWN_TRAFFIC,
+        in_interface=in_interface,
+        out_interface=out_interface,
     )
+
+  def clean_up(self) -> None:
+    """Cleans up firewall rules created by this manager."""
     self._ssh.execute_command(
-        command=constants.Commands.FIREWALL_NFTABLES_FORWARD_KNOWN_TRAFFIC.format(
-            action=nftables_action,
-            in_interface=in_interface,
-            out_interface=out_interface,
-        ),
+        command=constants.Commands.FIREWALL_NFTABLES_CLEANUP,
         timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
-        ignore_error=(action == FirewallAction.DELETE),
+        ignore_error=True,
     )
 
 
@@ -227,7 +244,7 @@ class Firewall:
     else:
       cmd_results = ssh_lib.CommandResults()
       self._ssh.execute_command(
-          'command -v nft',
+          'command -v fw4',
           timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
           ignore_error=True,
           command_results_collector=cmd_results,
@@ -254,7 +271,9 @@ class Firewall:
       action: FirewallAction = FirewallAction.INSERT,
   ) -> None:
     """Allows or removes forwarding of all traffic between interfaces."""
-    self._get_delegate().forward_traffic(in_interface, out_interface, action)
+    self._get_delegate().forward_traffic(
+        in_interface=in_interface, out_interface=out_interface, action=action
+    )
 
   def forward_known_traffic(
       self,
@@ -264,5 +283,9 @@ class Firewall:
   ) -> None:
     """Allows or removes forwarding of established/related traffic between interfaces."""
     self._get_delegate().forward_known_traffic(
-        in_interface, out_interface, action
+        in_interface=in_interface, out_interface=out_interface, action=action
     )
+
+  def clean_up(self) -> None:
+    """Cleans up firewall rules created by this manager."""
+    self._get_delegate().clean_up()

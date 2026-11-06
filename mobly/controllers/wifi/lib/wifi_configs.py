@@ -17,6 +17,7 @@
 from collections.abc import Iterable, Mapping, Sequence, Set
 import dataclasses
 import enum
+import hashlib
 import random
 import re
 from typing import Final
@@ -28,6 +29,7 @@ from mobly.controllers.wifi.lib import constants
 from mobly.controllers.wifi.lib import errors
 from mobly.controllers.wifi.lib import iw_utils
 from mobly.controllers.wifi.lib.encryption import base_encryption_config
+from mobly.controllers.wifi.lib.encryption import constants as encryption_constants
 from mobly.controllers.wifi.lib.encryption import open as open_sec
 from mobly.controllers.wifi.lib.encryption import wep
 from mobly.controllers.wifi.lib.encryption import wpa
@@ -357,10 +359,26 @@ class Mode(enum.StrEnum):
     return members.index(self) > members.index(other)  # pyrefly: ignore[bad-argument-type]
 
 
-def get_standard_from_ht_mode(ht_mode: Mode) -> Ieee80211Standards:
-  """Gets the standard from the HT mode."""
+def get_standard_from_ht_mode(
+    ht_mode: Mode, band_type: BandType | None = None
+) -> Ieee80211Standards:
+  """Gets the standard from the HT mode.
+
+  Args:
+    ht_mode: The HT mode.
+    band_type: The band type. Only used to disambiguate `Mode.NOHT`, which maps
+      to 802.11a on 5 GHz and to 802.11b otherwise.
+
+  Returns:
+    The IEEE 802.11 standard represented by the HT mode.
+
+  Raises:
+    errors.ConfigError: If the HT mode is not supported.
+  """
   match ht_mode:
     case Mode.NOHT:
+      if band_type == BandType.BAND_5G:
+        return Ieee80211Standards.A
       return Ieee80211Standards.B
     case Mode.HT20 | Mode.HT40 | Mode.HT40_PLUS | Mode.HT40_MINUS:
       return Ieee80211Standards.N
@@ -763,6 +781,149 @@ def _get_default_width(band_type: BandType) -> ChannelWidth:
       )
 
 
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class FtConfig:
+  """Configuration for IEEE 802.11r Fast BSS Transition (FT).
+
+  Attributes:
+    mobility_domain: 2-octet (4-hex character) Mobility Domain ID. If None,
+      derived automatically from the SSID MD5 hash.
+    nas_identifier: 1..48 octet NAS-Identifier (R0KH-ID). If None, derived from
+      the BSSID or a unique BSS identifier.
+    ft_psk_generate_local: Whether to generate FT-PSK keys locally without RRB
+      key exchange. Only valid for WPA2-PSK (FT-PSK). If None, automatically set
+      to True for FT-PSK and False for FT-SAE / FT-EAP.
+    ft_over_ds: Whether to enable Fast Transition over DS.
+    r1_key_holder: 6-octet (12-hex character) R1KH-ID. If None and
+      ft_psk_generate_local is False, derived from BSSID when available (or left
+      None for hostapd to default to own_addr).
+    r0kh: R0KH configuration entry/entries (e.g. wildcard 'ff:ff:ff:ff:ff:ff *
+      <key>'). If None and ft_psk_generate_local is False, automatically
+      generated using wildcard R0KH and MD5 key derived from mobility_domain and
+      passphrase.
+    r1kh: R1KH configuration entry/entries (e.g. wildcard '00:00:00:00:00:00
+      00:00:00:00:00:00 <key>'). If None and ft_psk_generate_local is False,
+      automatically generated using wildcard R1KH and MD5 key derived from
+      mobility_domain and passphrase.
+  """
+
+  mobility_domain: str | None = None
+  nas_identifier: str | None = None
+  ft_psk_generate_local: bool | None = None
+  ft_over_ds: bool = False
+  r1_key_holder: str | None = None
+  r0kh: str | Sequence[str] | None = None
+  r1kh: str | Sequence[str] | None = None
+  _template: 'FtConfig | None' = dataclasses.field(
+      default=None, repr=False, compare=False
+  )
+  _resolved: 'FtConfig | None' = dataclasses.field(
+      default=None, repr=False, compare=False
+  )
+
+  def __post_init__(self):
+    if isinstance(self.r0kh, Sequence) and not isinstance(
+        self.r0kh, (str, tuple)
+    ):
+      object.__setattr__(self, 'r0kh', tuple(self.r0kh))
+    if isinstance(self.r1kh, Sequence) and not isinstance(
+        self.r1kh, (str, tuple)
+    ):
+      object.__setattr__(self, 'r1kh', tuple(self.r1kh))
+
+    if self._template is not None and self._resolved is not None:
+      overrides = {
+          name: getattr(self, name)
+          for name in (
+              'mobility_domain',
+              'nas_identifier',
+              'ft_psk_generate_local',
+              'ft_over_ds',
+              'r1_key_holder',
+              'r0kh',
+              'r1kh',
+          )
+          if getattr(self, name) != getattr(self._resolved, name)
+      }
+      if overrides:
+        object.__setattr__(
+            self,
+            '_template',
+            dataclasses.replace(
+                self._template, _template=None, _resolved=None, **overrides
+            ),
+        )
+        object.__setattr__(self, '_resolved', self)
+
+  def resolve(self, wifi_config: 'WiFiConfig') -> 'FtConfig':
+    """Returns a resolved FtConfig with unspecified fields populated."""
+    base = self._template if self._template is not None else self
+
+    if not wifi_config.ssid:
+      raise errors.ConfigError('Got empty SSID for mobility domain generation.')
+
+    mobility_domain = (
+        base.mobility_domain
+        or hashlib.md5(wifi_config.ssid.encode()).hexdigest()[:4]
+    )
+
+    if base.nas_identifier is not None:
+      nas_identifier = base.nas_identifier
+    elif wifi_config.bssid:
+      nas_identifier = wifi_config.bssid.replace(':', '')
+    else:
+      nas_identifier = (
+          f'{mobility_domain}_{wifi_config.band_type.name.lower()}'
+          f'_{wifi_config.channel}'
+      )
+
+    if base.ft_psk_generate_local is not None:
+      ft_psk_generate_local = base.ft_psk_generate_local
+    else:
+      ft_key_mgmt = (
+          wifi_config.encryption_config.get_ft_key_mgmt()
+          if wifi_config.encryption_config
+          else set()
+      )
+      ft_psk_generate_local = ft_key_mgmt == {
+          encryption_constants.KeyMgmt.FT_PSK
+      }
+
+    r1_key_holder = base.r1_key_holder
+    r0kh = base.r0kh
+    r1kh = base.r1kh
+
+    if not ft_psk_generate_local:
+      if r1_key_holder is None and wifi_config.bssid:
+        r1_key_holder = wifi_config.bssid.replace(':', '')
+      password = ''
+      if (
+          wifi_config.encryption_config
+          and wifi_config.encryption_config.password
+      ):
+        password = wifi_config.encryption_config.password
+      ft_key = hashlib.md5(
+          f'{mobility_domain}/{password}'.encode()
+      ).hexdigest()
+      if r0kh is None:
+        r0kh = f'ff:ff:ff:ff:ff:ff * {ft_key}'
+      if r1kh is None:
+        r1kh = f'00:00:00:00:00:00 00:00:00:00:00:00 {ft_key}'
+
+    resolved = FtConfig(
+        mobility_domain=mobility_domain,
+        nas_identifier=nas_identifier,
+        ft_psk_generate_local=ft_psk_generate_local,
+        ft_over_ds=base.ft_over_ds,
+        r1_key_holder=r1_key_holder,
+        r0kh=r0kh,
+        r1kh=r1kh,
+        _template=base,
+    )
+    object.__setattr__(resolved, '_resolved', resolved)
+    return resolved
+
+
 @dataclasses.dataclass
 class WiFiConfig:
   """Settings required for the WiFi we need to start.
@@ -794,10 +955,11 @@ class WiFiConfig:
     custom_dhcp_configs: The custom DHCP configurations.
     ap_type: The AP type of the WiFi network (AP, Monitor, etc.)
     pure_mode: Whether to use pure mode for hostapd config.
-    ft: Whether to use 802.11r Fast BSS Transition.
+    ft_config: Configuration for 802.11r Fast BSS Transition.
   """
 
-  # Default to WiFi 6 (or 802.11n if WEP). Resolved in _post_init_.
+  # If None, derived from `ht_mode` when set; otherwise defaults to WiFi 6 (or
+  # 802.11n if WEP). Resolved in _post_init_.
   standard: constants.Ieee80211Standards = dataclasses.field(default=None, init=True)  # pyrefly: ignore[bad-assignment]
 
   # If None, will be automatically generated in _post_init_.
@@ -844,8 +1006,8 @@ class WiFiConfig:
   # Whether the WiFi network is hidden.
   hidden: bool = False
 
-  # Whether to use 802.11r Fast BSS Transition.
-  ft: bool = False
+  # Configuration for 802.11r Fast BSS Transition.
+  ft_config: FtConfig | None = None
 
   # Whether to access wide area network (WAN) through network address
   # translation(NAT). If true, each wireless network will be on its own subnet
@@ -895,6 +1057,9 @@ class WiFiConfig:
   pure_mode: bool = False
 
   _bssid: str | None = dataclasses.field(default=None, init=False)
+  _auto_band_type: BandType | None = dataclasses.field(
+      default=None, repr=False, compare=False
+  )
 
   def __post_init__(self):
     if self.bssid_or_generate_mode == BssidGenerateMode.RANDOM:
@@ -909,9 +1074,11 @@ class WiFiConfig:
     ):
       raise errors.ConfigError(f'Invalid BSSID: {self._bssid}')
 
-    if self.band_type is None:
+    if self.band_type is None or self.band_type == self._auto_band_type:
       self.band_type = band_type_from_channel(self.channel)  # pyrefly: ignore[bad-assignment]
+      self._auto_band_type = self.band_type
     else:
+      self._auto_band_type = None
       if not is_valid_channel(self.channel, self.band_type):
         raise errors.ConfigError(
             f'Incompatible channel {self.channel} and band {self.band_type}'
@@ -920,8 +1087,14 @@ class WiFiConfig:
     if self.ssid is None:
       self.ssid = generate_wifi_ssid(self.band_type)
 
+    if self.ft_config is not None:
+      self.ft_config = self.ft_config.resolve(self)
+
     if self.standard is None:
-      if isinstance(self.encryption_config, wep.Wep):
+      if self.ht_mode is not None:
+        # The HT mode fully determines the standard.
+        self.standard = get_standard_from_ht_mode(self.ht_mode, self.band_type)  # pyrefly: ignore[bad-assignment]
+      elif isinstance(self.encryption_config, wep.Wep):
         self.standard = constants.Ieee80211Standards.N  # pyrefly: ignore[bad-assignment]
       else:
         self.standard = constants.Ieee80211Standards.AX  # pyrefly: ignore[bad-assignment]
@@ -1194,7 +1367,9 @@ class WifiLinkInfo:
 
     if self.standard is None and self.ht_mode is not None:
       object.__setattr__(
-          self, 'standard', get_standard_from_ht_mode(self.ht_mode)
+          self,
+          'standard',
+          get_standard_from_ht_mode(self.ht_mode, self.band_type),
       )
 
     if self.width is None and self.ht_mode is not None:

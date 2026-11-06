@@ -22,6 +22,7 @@ import errno
 import logging
 import os
 import pathlib
+import shutil
 import signal
 import socket
 import stat
@@ -127,6 +128,13 @@ class RemoteTimeoutError(Error):
 
 class PortForwardingError(Error):
   """Raised when a port forwarding operation encounters an error."""
+
+
+# Everything a severed or unhealthy session can surface at a caller. `SSHProxy`
+# wraps most remote failures in the hierarchy above, but paramiko and the socket
+# layer also reach callers directly through SFTP and channel operations.
+# Teardown paths catch this tuple so a dead session cannot abort cleanup.
+SSH_ERRORS = (Error, paramiko.SSHException, EOFError, OSError)
 
 
 class SSHProxy:
@@ -444,20 +452,27 @@ class SSHProxy:
       RemotePathDoesNotExistError: If the remote file is missing.
       SSHNotConnectedError: If sftp is not connected.
     """
-    if not self.exists(remote_src_filepath):
-      raise RemotePathDoesNotExistError(
-          self, f'The file to pull ({remote_src_filepath}) does not exist.')
-
-    local_dir_path = os.path.dirname(local_dest_filepath)
-    if not os.path.exists(local_dir_path):
-      os.makedirs(local_dir_path)
-
     if self._sftp is None:
       raise SSHNotConnectedError(
           ssh=self,
           message=_SFTP_NOT_CONNECTED_ERROR_MESSAGE,
       )
-    self._sftp.get(remote_src_filepath, local_dest_filepath)
+    # Open the remote file before touching the local side, unlike
+    # SFTPClient.get, which truncates the local file even if the remote one is
+    # missing (https://github.com/paramiko/paramiko/issues/724).
+    try:
+      remote_file = self._sftp.open(remote_src_filepath, 'rb')
+    except FileNotFoundError as e:
+      raise RemotePathDoesNotExistError(
+          self, f'The file to pull ({remote_src_filepath}) does not exist.'
+      ) from e
+    with remote_file:
+      local_dir_path = os.path.dirname(local_dest_filepath)
+      if not os.path.exists(local_dir_path):
+        os.makedirs(local_dir_path)
+      with open(local_dest_filepath, 'wb') as local_file:
+        remote_file.prefetch()
+        shutil.copyfileobj(remote_file, local_file)
 
   def pull_to_directory(self, remote_src_filepath: str,
                         local_directory: str) -> None:
@@ -497,19 +512,25 @@ class SSHProxy:
         yield entry_path
 
   def pull_remote_directory(self, remote_src_dir: str,
-                            local_dest_dir: str) -> None:
+                            local_dest_dir: str) -> list[str]:
     """Pulls all files within a remote directory to local directory recursively.
 
     Args:
       remote_src_dir: The path to the remote source directory.
       local_dest_dir: The path to the local destination directory.
+
+    Returns:
+      The local paths of the pulled files.
     """
+    pulled_files = []
     for remote_filepath in self._get_file_paths_in_remote_directory(
         pathlib.PurePosixPath(remote_src_dir)):
       # Use Path.joinpath to avoid messing up the forward/backward slashes.
       local_filepath = pathlib.Path(local_dest_dir).joinpath(
           remote_filepath.relative_to(remote_src_dir))
       self.pull(str(remote_filepath), str(local_filepath))
+      pulled_files.append(str(local_filepath))
+    return pulled_files
 
   def rm_dir_or_error(self, remote_dir: str) -> None:
     """Recursively force remove a remote directory or else raise an error.

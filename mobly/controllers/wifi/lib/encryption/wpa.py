@@ -196,11 +196,17 @@ class WpaCommon(base_encryption_config.BaseEncryptionConfig):
           f'PMF must be set to at least {pmf_needed}, while it is set to {pmf}'
       )
 
-    if self._ciphers:
-      hostapd_conf.update('wpa_pairwise', ' '.join(self._ciphers))
+    for key, value in self.get_extra_hostapd_params_for_ciphers().items():
+      hostapd_conf.update(key, value)
 
+  def get_extra_hostapd_params_for_ciphers(self) -> dict[str, str]:
+    """Returns extra hostapd parameters for cipher configurations."""
+    extra_hostapd_params = {}
     if self._ciphers2:
-      hostapd_conf.update('rsn_pairwise', ' '.join(self._ciphers2))
+      extra_hostapd_params['rsn_pairwise'] = ' '.join(sorted(self._ciphers2))
+    if self._ciphers:
+      extra_hostapd_params['wpa_pairwise'] = ' '.join(sorted(self._ciphers))
+    return extra_hostapd_params
 
 
 class Wpa(WpaCommon):
@@ -311,13 +317,13 @@ class Wpa(WpaCommon):
     elif mode & Mode.PURE_WPA:
       encryption = uci_encryptions.Encryption.PSK
     else:
-      encryption = uci_encryptions.Encryption.PSK
+      raise ValueError(f'Unsupported WPA mode for UCI config: {mode}')
 
     return uci_encryptions.UciEncryptionConfig(
         encryption=encryption,
         key=self._password,
         ieee80211w=self._get_required_pmf(),
-        ciphers=self._ciphers | self._ciphers2,
+        extra_hostapd_params=self.get_extra_hostapd_params_for_ciphers(),
     )
 
 

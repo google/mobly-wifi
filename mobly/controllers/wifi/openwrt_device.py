@@ -85,7 +85,7 @@ def create(configs: list[dict[str, Any]]) -> list[OpenWrtDevice]:
   return devices
 
 
-def destroy(devices: list[OpenWrtDevice]) -> None:
+def destroy(devices: Sequence[OpenWrtDevice]) -> None:
   """Closes all created OpenWrt device instances."""
   for device in devices:
     try:
@@ -373,7 +373,7 @@ class OpenWrtDevice:
     """Reboots the device.
 
     Generally one should use this method to reboot the device instead of
-    directly calling `ssh.execute_command('sudo reboot')`. Because this method
+    directly calling `ssh.execute_command('reboot')`. Because this method
     gracefully handles the teardown and restoration of running services.
 
     This method is blocking and only returns when the reboot has completed
@@ -854,18 +854,6 @@ class OpenWrtDevice:
         ignore_error=True,
     )
 
-  def _log_certificate_info(self, cert_file: pathlib.PurePosixPath) -> None:
-    """Logs the certificate information to the syslog.
-
-    Args:
-      cert_file: The path to the certificate file to log.
-    """
-    cmd = (
-        f"openssl x509 -in '{cert_file}' -noout -text 2>&1 | "
-        'logger -t openssl-test'
-    )
-    self.ssh.execute_command(command=cmd, ignore_error=True)
-
   def upload_certificates(
       self, cert: certificate.Certificate
   ) -> certificate.CertificatesData:
@@ -903,7 +891,14 @@ class OpenWrtDevice:
     if cert.eap_users and eap_user_file is not None:
       _push_content(cert.eap_users, eap_user_file)
 
-    self._log_certificate_info(ca_cert_file)
+    self.log.info(
+        'Uploaded certificates to router: ca_cert=%s, cert=%s, key=%s,'
+        ' eap_user=%s',
+        ca_cert_file,
+        cert_file,
+        key_file,
+        eap_user_file,
+    )
 
     return certificate.CertificatesData(
         ca_cert_file=ca_cert_file,
