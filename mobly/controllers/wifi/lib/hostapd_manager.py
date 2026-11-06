@@ -23,7 +23,6 @@ from collections.abc import Iterable, Sequence
 import contextlib
 import dataclasses
 import datetime
-import hashlib
 import logging
 import os
 import typing
@@ -113,11 +112,6 @@ _IS_CUSTOM_OPENWRT_TO_DEFAULT_FRAGM_THRESHOLD = {
     True: 2346,
     False: -1,
 }
-
-MOBILITY_DOMAIN_LENGTH = 4
-MOBILITY_DOMAIN_HOSTAPD_KEY = 'mobility_domain'
-NAS_IDENTIFIER_HOSTAPD_KEY = 'nas_identifier'
-FT_PSK_GENERATE_LOCAL_HOSTAPD_KEY = 'ft_psk_generate_local'
 
 
 def get_pure_mode_hostapd_options(
@@ -479,32 +473,6 @@ class HostapdConfig:
     else:
       return value
 
-  def _get_default_mobility_domain(
-      self, wifi_config: wifi_configs.WiFiConfig
-  ) -> str | None:
-    """Gets the default mobility domain for the given WiFi config."""
-    if not wifi_config.ssid:
-      raise errors.ConfigError('Got empty SSID for mobility domain generation.')
-
-    if MOBILITY_DOMAIN_HOSTAPD_KEY in wifi_config.custom_hostapd_configs:
-      return None
-
-    return hashlib.md5(wifi_config.ssid.encode()).hexdigest()[
-        :MOBILITY_DOMAIN_LENGTH
-    ]
-
-  def _get_default_nas_identifier(
-      self, wifi_config: wifi_configs.WiFiConfig
-  ) -> str | None:
-    """Gets the default NAS identifier for the given WiFi config."""
-    if NAS_IDENTIFIER_HOSTAPD_KEY in wifi_config.custom_hostapd_configs:
-      return None
-
-    if not wifi_config.bssid:
-      raise errors.ConfigError('Got empty BSSID for NAS identifier generation.')
-
-    return wifi_config.bssid.replace(':', '')
-
   def _prepare_key_mgmt_for_fast_transition(
       self, wifi_config: wifi_configs.WiFiConfig
   ) -> None:
@@ -527,27 +495,42 @@ class HostapdConfig:
   ) -> None:
     """Prepares the fast transition configuration.
 
-    If the AP is configured to support fast transition, we need to set the
-    mobility domain, NAS identifier and enable local PSK generation.
-
     Args:
       wifi_config: The WiFi config.
     """
-    if not wifi_config.ft:
+    ft_config = wifi_config.ft_config
+    if ft_config is None:
       return
-    mobility_domain = self._get_default_mobility_domain(wifi_config)
-    if mobility_domain is not None:
-      self.update(MOBILITY_DOMAIN_HOSTAPD_KEY, mobility_domain)
 
-    nas_identifier = self._get_default_nas_identifier(wifi_config)
-    if nas_identifier is not None:
-      self.update(NAS_IDENTIFIER_HOSTAPD_KEY, nas_identifier)
+    if ft_config.mobility_domain is not None:
+      self.update('mobility_domain', ft_config.mobility_domain)
 
-    if (
-        FT_PSK_GENERATE_LOCAL_HOSTAPD_KEY
-        not in wifi_config.custom_hostapd_configs
-    ):
-      self.update(FT_PSK_GENERATE_LOCAL_HOSTAPD_KEY, '1')
+    if ft_config.nas_identifier is not None:
+      self.update('nas_identifier', ft_config.nas_identifier)
+
+    if ft_config.ft_psk_generate_local is not None:
+      self.update(
+          'ft_psk_generate_local',
+          '1' if ft_config.ft_psk_generate_local else '0',
+      )
+
+    if ft_config.ft_over_ds:
+      self.update('ft_over_ds', '1')
+
+    if ft_config.r1_key_holder is not None:
+      self.update('r1_key_holder', ft_config.r1_key_holder)
+
+    if ft_config.r0kh is not None:
+      if isinstance(ft_config.r0kh, str):
+        self.update('r0kh', ft_config.r0kh)
+      else:
+        self._raw['r0kh'] = [str(v) for v in ft_config.r0kh]
+
+    if ft_config.r1kh is not None:
+      if isinstance(ft_config.r1kh, str):
+        self.update('r1kh', ft_config.r1kh)
+      else:
+        self._raw['r1kh'] = [str(v) for v in ft_config.r1kh]
 
     self._prepare_key_mgmt_for_fast_transition(wifi_config)
 
@@ -589,34 +572,28 @@ class HostapdConfig:
         key, value = pure_mode_options
         self.update(key, value)
 
-    if wifi_config.ft:
+    if wifi_config.ft_config is not None:
       self._prepare_fast_transition(wifi_config)
 
-  def set_ssid(self, value: str):
+  def set_ssid(self, value: str | ssid_lib.SSID):
     """Sets the SSID for the hostapd configuration.
 
     SSIDs are stored in the `ssid2` field of the hostapd configuration.
-    If the SSID is already in a printf-escaped format (e.g., starting with
-    'P"' and ending with '"'), it's used directly. Otherwise, the SSID is
-    wrapped in double quotes. The printf-escaped format is mentioned in
-    the hostapd document:
-    https://git.w1.fi/cgit/hostap/plain/hostapd/hostapd.conf
-
-    printf_encode used for printf_escaped format in hostapd can be found at:
-    https://w1.fi/cgit/hostap/tree/src/utils/common.c?h=hostap_2_10#n477
+    If the SSID requires hex encoding (e.g., non-ASCII, special characters, or
+    printf-escaped), it is stored as a hex string (`ssid2=<hex>`). Otherwise,
+    the SSID is wrapped in double quotes (`ssid2="<ssid>"`).
 
     Args:
-      value: The SSID string.
+      value: The SSID string or SSID object.
     """
-    self.ssid = value
-    # SSIDs in printf-escape format are already wrapped in quotes, so they
-    # don't need additional quoting.
-    if ssid_lib.is_printf_encoded_ssid(value):
-      self.update('ssid2', value)
-    elif ssid_lib.needs_printf_encoding(value):
-      self.update('ssid2', ssid_lib.encode_printf_ssid(value))
+    ssid_obj = (
+        value if isinstance(value, ssid_lib.SSID) else ssid_lib.SSID(value)
+    )
+    self.ssid = str(ssid_obj)
+    if ssid_obj.is_hex:
+      self.update('ssid2', ssid_obj.hex)
     else:
-      self.update('ssid2', f'"{value}"')
+      self.update('ssid2', f'"{ssid_obj}"')
 
   def set_password(self, value: str | None):
     self.password = value
@@ -937,12 +914,29 @@ class HostapdCli:
     command_args = ['deauthenticate', mac_address, f'reason={reason_code}']
     return self._run_command(command_args)
 
-  def stop(self) -> bool:
+  def stop(self, deauth: bool = True) -> bool:
     """Stops the interface for which the hostapd instance is running.
+
+    Args:
+      deauth: Whether to send broadcast deauthentication frames when stopping.
+        Note: On BPi routers, calling stop with `deauth=True` can cause hostapd
+          to hang for 350-850ms, which may cause test issues if subsequent
+          operations are executed immediately after turning off the interface.
 
     Returns:
       True if the interface was stopped successfully, False otherwise.
     """
+    broadcast_deauth_val = '1' if deauth else '0'
+    set_output = self._run_command(
+        ['set', 'broadcast_deauth', broadcast_deauth_val]
+    )
+    if set_output != 'OK':
+      self._log.warning(
+          'Failed to set broadcast_deauth=%s on interface %s. Output: %s',
+          broadcast_deauth_val,
+          self._interface,
+          set_output,
+      )
     output = self._run_command(['disable'])
     return output == 'OK'
 
@@ -1058,10 +1052,7 @@ class HostapdManager:
     )
     self._wifi_info = wifi_configs.WifiInfo(
         id=self._wifi_id,
-        ssid=(
-            ssid_lib.decode_printf_ssid(self._hostapd_config.ssid)
-            or self._hostapd_config.ssid
-        ),
+        ssid=self._hostapd_config.ssid,
         password=self._hostapd_config.password,
         interface=self._interface,
         phy_name=self._phy.name,
@@ -1289,12 +1280,19 @@ class HostapdManager:
           f'Failed to switch channel to {target_channel}. Output: {output}'
       )
 
-  def turn_off_radio(self) -> None:
+  def turn_off_radio(self, deauth: bool = False) -> None:
     """Turns off radio transmission via hostapd_cli disable to simulate AP power-off.
 
     This command stops beacon and frame transmissions on the wireless interface
     immediately without sending deauthentication frames to connected clients
     prior to stopping.
+
+    Note: On BPi routers, calling `turn_off_radio` with `deauth=True` can cause
+    hostapd to hang for 350-850ms, which may cause test issues if subsequent
+    operations are executed immediately after turning off the radio.
+
+    Args:
+      deauth: Whether to send broadcast deauthentication frames when disabling.
 
     Raises:
       errors.BaseError: If hostapd process is not running, HostapdCli is not
@@ -1306,8 +1304,7 @@ class HostapdManager:
       )
     if self._hostapd_cli is None:
       raise errors.BaseError('HostapdCli is not initialized.')
-    if not self._hostapd_cli.stop():
+    if not self._hostapd_cli.stop(deauth=deauth):
       raise errors.BaseError(
           f'Failed to turn off radio on interface {self._interface}'
       )
-

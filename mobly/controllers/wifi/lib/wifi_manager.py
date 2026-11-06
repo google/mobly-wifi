@@ -194,7 +194,7 @@ class WiFiManager:
   """
 
   _running_wifis: dict[int, WiFiComponents]
-  _was_system_dnsmasq_enabled: bool
+  _was_system_dnsmasq_enabled: bool | None
   _system_dnsmasq_active: bool
 
   @property
@@ -301,7 +301,7 @@ class WiFiManager:
     self._running_wifis = {}
     self._wan_interface = wan_interface or None
     self._firewall = firewall or firewall_manager.Firewall(device.ssh)
-    self._was_system_dnsmasq_enabled = False
+    self._was_system_dnsmasq_enabled: bool | None = None
     self._system_dnsmasq_active = False
     self._is_torn_down = False
 
@@ -319,7 +319,9 @@ class WiFiManager:
 
     This method should be called after each AP device reboot.
     """
-    self._was_system_dnsmasq_enabled = self._is_system_dnsmasq_enabled()
+    self._is_torn_down = False
+    if self._was_system_dnsmasq_enabled is None:
+      self._was_system_dnsmasq_enabled = self._is_system_dnsmasq_enabled()
     self.set_dnsmasq(enabled=False)
 
     # Kill any existing hostapd instances.
@@ -336,8 +338,9 @@ class WiFiManager:
         ignore_error=True,
     )
 
-    # We don't need to remove these firewall rule modifications in teardown
-    # phase because device reboot automatically reset them.
+    # Clean up any leftover persistent firewall rule files from previous runs.
+    self._firewall.clean_up()
+
     # Enable the kernel to route packets between different networks.
     self._firewall.allow_ip_forward()
 
@@ -423,7 +426,12 @@ class WiFiManager:
         wifi_config=config,
         bridge=bridge_name,
     )
-    wifi_info = hostapd_manager_obj.start()
+    try:
+      wifi_info = hostapd_manager_obj.start()
+    except (ssh_lib.SSHRemoteError, errors.BaseError):
+      self._delete_interfaces(interface=managed_interface, bridge=bridge_name)
+      raise
+
     self._running_wifis[wifi_id] = WiFiComponents(
         info=wifi_info,
         config=config,
@@ -528,6 +536,13 @@ class WiFiManager:
     """
     bridge_name = f'br{wifi_id}'
     self._device.ssh.execute_command(
+        command=constants.Commands.IP_LINK_DELETE_BRIDGE.format(
+            interface=bridge_name
+        ),
+        timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
+        ignore_error=True,
+    )
+    self._device.ssh.execute_command(
         command=constants.Commands.IP_LINK_ADD_BRIDGE.format(
             interface=bridge_name
         ),
@@ -540,6 +555,25 @@ class WiFiManager:
         timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
     )
     return bridge_name
+
+  def _delete_interfaces(
+      self, *, interface: str, bridge: str | None = None
+  ) -> None:
+    """Deletes the bridge (if any) and virtual wireless interface."""
+    if bridge is not None:
+      self._device.ssh.execute_command(
+          command=constants.Commands.IP_LINK_DELETE_BRIDGE.format(
+              interface=bridge
+          ),
+          timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
+          ignore_error=True,
+      )
+    self._log.debug('Deleting network interface: %s', interface)
+    self._device.ssh.execute_command(
+        command=constants.Commands.IW_DEV_DEL.format(interface=interface),
+        timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
+        ignore_error=True,
+    )
 
   def _modify_firewall_rules(
       self,
@@ -695,7 +729,7 @@ class WiFiManager:
           ' this WiFiManager.'
       )
     wifi_components = self._running_wifis[wifi_info.id]
-    wifi_components.hostapd_manager.turn_off_radio()
+    wifi_components.hostapd_manager.turn_off_radio(deauth=False)
 
   def teardown(self):
     """Tears this WiFi manager down and stops all running WiFi."""
@@ -703,7 +737,10 @@ class WiFiManager:
       return
     self._is_torn_down = True
     self.stop_all_wifi()
-    self.set_dnsmasq(enabled=self._was_system_dnsmasq_enabled)
+    self._firewall.clean_up()
+    if self._was_system_dnsmasq_enabled is not None:
+      self.set_dnsmasq(enabled=self._was_system_dnsmasq_enabled)
+      self._was_system_dnsmasq_enabled = None
 
   def stop_all_wifi(self):
     """Stops all running WiFi."""
@@ -773,26 +810,9 @@ class WiFiManager:
           action=firewall_manager.FirewallAction.DELETE,
       )
 
-      # Delete the bridge interface.
-      if component.info.bridge is not None:
-        self._device.ssh.execute_command(
-            command=constants.Commands.IP_LINK_DELETE_BRIDGE.format(
-                interface=component.info.bridge
-            ),
-            timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
-            ignore_error=True,
-        )
-
-      # Delete the network interface.
-      self._log.debug(
-          'Deleting network interface: %s', component.info.interface
-      )
-      self._device.ssh.execute_command(
-          command=constants.Commands.IW_DEV_DEL.format(
-              interface=component.info.interface
-          ),
-          timeout=constants.CMD_SHORT_TIMEOUT.total_seconds(),
-          ignore_error=True,
+      self._delete_interfaces(
+          interface=component.info.interface,
+          bridge=component.info.bridge,
       )
 
     if hostapd_stop_error is not None:

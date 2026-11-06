@@ -139,11 +139,22 @@ class IptablesAction(enum.StrEnum):
   DELETE = '-D'
 
 
-@enum.unique
-class NftablesAction(enum.StrEnum):
+# Directory and prefix for OpenWrt fw4 pre-chain drop-in nftables rule files.
+NFTABLES_CHAIN_PRE_DIR = '/usr/share/nftables.d/chain-pre'
+NFTABLES_RULE_FILE_PREFIX = 'mobly_'
+FW4_RELOAD = 'fw4 reload'
 
-  INSERT = 'insert'
-  DELETE = 'delete'
+_nft_insert_cmd = lambda chain, name, rule: (
+    f'mkdir -p {NFTABLES_CHAIN_PRE_DIR}/{chain} && '
+    f"echo '{rule}' >"
+    f' {NFTABLES_CHAIN_PRE_DIR}/{chain}/{NFTABLES_RULE_FILE_PREFIX}{name}.nft'
+    f' && {FW4_RELOAD}'
+)
+_nft_delete_cmd = lambda chain, name: (
+    'rm -f'
+    f' {NFTABLES_CHAIN_PRE_DIR}/{chain}/{NFTABLES_RULE_FILE_PREFIX}{name}.nft'
+    f' && {FW4_RELOAD}'
+)
 
 
 @enum.unique
@@ -200,16 +211,39 @@ class Commands(enum.StrEnum):
   )
 
   # Firewall rules related commands (nftables)
-  FIREWALL_NFTABLES_ENABLE_NAT = (
-      'nft insert rule inet fw4 srcnat oifname "{interface}" masquerade'
+  FIREWALL_NFTABLES_ENABLE_NAT = _nft_insert_cmd(
+      chain='srcnat',
+      name='nat_{interface}',
+      rule='oifname "{interface}" masquerade',
   )
-  FIREWALL_NFTABLES_FORWARD_TRAFFIC = (
-      'nft {action} rule inet fw4 forward iifname "{in_interface}" oifname'
-      ' "{out_interface}" accept'
+  FIREWALL_NFTABLES_INSERT_FORWARD_TRAFFIC = _nft_insert_cmd(
+      chain='forward',
+      name='forward_{in_interface}_{out_interface}',
+      rule='iifname "{in_interface}" oifname "{out_interface}" accept',
   )
-  FIREWALL_NFTABLES_FORWARD_KNOWN_TRAFFIC = (
-      'nft {action} rule inet fw4 forward iifname "{in_interface}" oifname'
-      ' "{out_interface}" ct state established,related accept'
+  FIREWALL_NFTABLES_DELETE_FORWARD_TRAFFIC = _nft_delete_cmd(
+      chain='forward',
+      name='forward_{in_interface}_{out_interface}',
+  )
+  FIREWALL_NFTABLES_INSERT_FORWARD_KNOWN_TRAFFIC = _nft_insert_cmd(
+      chain='forward',
+      name='forward_known_{in_interface}_{out_interface}',
+      rule=(
+          'iifname "{in_interface}" oifname "{out_interface}" ct state'
+          ' established,related accept'
+      ),
+  )
+  FIREWALL_NFTABLES_DELETE_FORWARD_KNOWN_TRAFFIC = _nft_delete_cmd(
+      chain='forward',
+      name='forward_known_{in_interface}_{out_interface}',
+  )
+  # `fw4 reload` only rebuilds `table inet fw4` and leaves non-fw4 tables or
+  # chains created by external services (e.g. OpenNDS captive portal or
+  # iptables-nft) active in the kernel. Flush the entire nftables ruleset
+  # before reloading fw4 so only clean default fw4 rules remain.
+  FIREWALL_NFTABLES_CLEANUP = (
+      f'rm -f {NFTABLES_CHAIN_PRE_DIR}/*/{NFTABLES_RULE_FILE_PREFIX}*.nft &&'
+      f' nft flush ruleset && {FW4_RELOAD}'
   )
 
   START_TCPDUMP = (
@@ -244,7 +278,7 @@ class Commands(enum.StrEnum):
 
   GET_PROCESS_BY_NAME = 'ps | grep {name}'
 
-  REBOOT = 'sudo reboot'
+  REBOOT = 'reboot'
 
   CHECK_DEVICE_REBOOT_READY = 'true'
 
